@@ -27,6 +27,7 @@ pub struct AppState {
     pub show_shortcut_dialog: bool,
     pub show_chapter_dialog: bool,
     pub show_image_dialog: bool,
+    pub show_history_dialog: bool,
     pub show_context_menu: bool,
     pub menu_position: (f32, f32),
 
@@ -65,6 +66,7 @@ impl AppState {
             show_shortcut_dialog: false,
             show_chapter_dialog: false,
             show_image_dialog: false,
+            show_history_dialog: false,
             show_context_menu: false,
             menu_position: (0.0, 0.0),
             tmp_bg_color: hex_to_rgb(bg),
@@ -78,6 +80,11 @@ impl AppState {
 
     pub fn load_file(&mut self, path: &PathBuf) -> bool {
         let path_str = path.to_string_lossy().to_string();
+
+        // 如果打开的文件与当前不同，先保存当前阅读进度
+        if self.current_file_path.as_deref() != Some(&path_str) {
+            self.save_history();
+        }
 
         if let Some(cached_lines) = self.cache.get_content(&path_str) {
             self.lines = cached_lines.clone();

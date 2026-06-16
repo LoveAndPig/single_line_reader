@@ -198,32 +198,10 @@ impl eframe::App for ReaderApp {
                                 vctx.send_viewport_cmd(ViewportCommand::Close);
                             }
 
-                            // 选择文件 → 历史记录
+                            // 历史记录
                             if ui.button("历史记录").clicked() {
-                                let state_inner = state.clone();
-                                let entries = state_inner.lock().unwrap().history_db.get_entries().to_vec();
-                                if entries.is_empty() {
-                                    // 无历史记录，不动作
-                                } else {
-                                    // 弹出子菜单——直接在下方渲染
-                                    // 用简单方式：直接选历史第1项？不，需要列表
-                                    // 改成：打开历史对话框
-                                    state.lock().unwrap().show_context_menu = false;
-                                    state.lock().unwrap().show_chapter_dialog = false;
-                                    // 暂时显示第一个历史记录或简单的文本选择
-                                    // 由于空间限制，只能简化处理
-                                    if let Some(entry) = entries.first() {
-                                        let path = entry.file_path.clone();
-                                        let line = entry.current_line;
-                                        std::thread::spawn(move || {
-                                            let mut s = state_inner.lock().unwrap();
-                                            let p = std::path::PathBuf::from(&path);
-                                            if s.load_file(&p) {
-                                                s.goto_line(line);
-                                            }
-                                        });
-                                    }
-                                }
+                                state.lock().unwrap().show_context_menu = false;
+                                state.lock().unwrap().show_history_dialog = true;
                                 vctx.send_viewport_cmd(ViewportCommand::Close);
                             }
 
@@ -376,6 +354,22 @@ impl eframe::App for ReaderApp {
                 // 没有可用图片，关闭对话框标记
                 self.with_state_mut(|s| s.show_image_dialog = false);
             }
+        }
+
+        // 历史记录对话框（独立 viewport）
+        if self.with_state(|s| s.show_history_dialog) {
+            let state = self.state.clone();
+
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("history_dialog"),
+                egui::ViewportBuilder::default()
+                    .with_title("阅读历史")
+                    .with_inner_size([500.0, 400.0])
+                    .with_resizable(true),
+                move |vctx, _class| {
+                    render_history_dialog(vctx, &state);
+                },
+            );
         }
     }
 
@@ -655,4 +649,113 @@ fn render_image_dialog(ctx: &egui::Context, state: &SharedState) {
             ui.label("无法加载图片");
         }
     });
+}
+
+fn render_history_dialog(ctx: &egui::Context, state: &SharedState) {
+    let entries = state.lock().unwrap().history_db.get_entries();
+    let mut should_close = false;
+    let mut jump_to: Option<(String, usize)> = None;
+
+    egui::CentralPanel::default().show(ctx, |ui| {
+        // 标题栏 + 关闭按钮（固定在顶部）
+        ui.horizontal(|ui| {
+            ui.heading("阅读历史");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("关闭").clicked() {
+                    should_close = true;
+                }
+            });
+        });
+        ui.label("双击条目跳转到对应位置");
+        ui.separator();
+
+        if entries.is_empty() {
+            ui.add_space(30.0);
+            ui.vertical_centered(|ui| {
+                ui.label("暂无阅读历史记录");
+            });
+        } else {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    for entry in &entries {
+                        let label = format!(
+                            "{}  |  第{}行/共{}行  |  {}",
+                            entry.file_name,
+                            entry.current_line + 1,
+                            entry.total_lines,
+                            entry.updated_at
+                        );
+                        let subtitle = &entry.file_path;
+
+                        // 分配固定高度的可点击区域
+                        let height = 52.0;
+                        let desired_size = egui::vec2(ui.available_width(), height);
+                        let (rect, response) = ui.allocate_exact_size(
+                            desired_size,
+                            egui::Sense::click(),
+                        );
+
+                        // 悬停高亮
+                        if response.hovered() || response.highlighted() {
+                            ui.painter().rect_filled(
+                                rect,
+                                3.0,
+                                egui::Color32::from_white_alpha(25),
+                            );
+                        }
+
+                        // 在区域内渲染文字
+                        if ui.is_rect_visible(rect) {
+                            let pos = rect.left_top() + egui::vec2(8.0, 4.0);
+                            ui.painter().text(
+                                pos,
+                                egui::Align2::LEFT_TOP,
+                                &label,
+                                egui::TextStyle::Button.resolve(&ui.style()),
+                                ui.style().visuals.text_color(),
+                            );
+                            ui.painter().text(
+                                pos + egui::vec2(0.0, 22.0),
+                                egui::Align2::LEFT_TOP,
+                                subtitle,
+                                egui::TextStyle::Small.resolve(&ui.style()),
+                                egui::Color32::GRAY,
+                            );
+                        }
+
+                        // 双击跳转
+                        if response.double_clicked() {
+                            jump_to = Some((entry.file_path.clone(), entry.current_line));
+                        }
+
+                        ui.separator();
+                    }
+                });
+        }
+
+        // 底部关闭按钮
+        ui.add_space(8.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("关闭").clicked() {
+                should_close = true;
+            }
+        });
+    });
+
+    // 处理动作（在 CentralPanel 之后执行，避免借用冲突）
+    if should_close {
+        state.lock().unwrap().show_history_dialog = false;
+    }
+    if let Some((path, line)) = jump_to {
+        let state_clone = state.clone();
+        std::thread::spawn(move || {
+            let mut s = state_clone.lock().unwrap();
+            let p = std::path::PathBuf::from(&path);
+            if s.load_file(&p) {
+                s.goto_line(line);
+            }
+        });
+        state.lock().unwrap().show_history_dialog = false;
+    }
 }
