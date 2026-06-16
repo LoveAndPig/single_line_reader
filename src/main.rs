@@ -11,8 +11,7 @@ mod tray;
 
 use state::SharedState;
 use state::STATE;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -25,12 +24,11 @@ fn main() -> Result<(), eframe::Error> {
 
     let state: SharedState = Arc::new(Mutex::new(app_state));
 
-    // 创建托盘通信通道
-    let (tray_tx, tray_rx) = mpsc::channel();
     let running = Arc::new(AtomicBool::new(true));
+    let window_visible = Arc::new(AtomicBool::new(true));
 
     // 启动托盘线程
-    tray::start_tray_thread(tray_tx, running.clone());
+    tray::start_tray_thread(running.clone(), window_visible.clone());
 
     // 将状态存储到全局变量
     STATE.set(state.clone()).ok();
@@ -110,9 +108,16 @@ fn main() -> Result<(), eframe::Error> {
             }
             cc.egui_ctx.set_fonts(fonts);
 
-            Ok(Box::new(app::ReaderApp::new(state, tray_rx, running)))
+            Ok(Box::new(app::ReaderApp::new(state, running.clone(), window_visible)))
         }),
-    )
+    )?;
+
+    // 通知托盘线程退出
+    running.store(false, Ordering::SeqCst);
+    // 给托盘线程一点时间清理
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    Ok(())
 }
 
 fn enumerate_fonts() -> Vec<String> {

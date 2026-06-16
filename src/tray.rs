@@ -1,6 +1,4 @@
-use crate::app::TrayCmd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -12,22 +10,26 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DispatchMessageW, GetCursorPos, HICON, IMAGE_ICON, LoadImageW,
-    PeekMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, TrackPopupMenu,
-    TranslateMessage, CS_DBLCLKS, CW_USEDEFAULT, IDC_ARROW, IDI_APPLICATION,
-    IMAGE_CURSOR, LR_DEFAULTSIZE, LR_SHARED, MF_STRING, MSG, PM_REMOVE,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, WM_CREATE, WM_DESTROY, WM_LBUTTONDBLCLK,
-    WM_RBUTTONUP, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    DispatchMessageW, FindWindowW, GetCursorPos, HICON, IMAGE_ICON, LoadImageW,
+    PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
+    ShowWindow, TrackPopupMenu, TranslateMessage, CS_DBLCLKS, CW_USEDEFAULT,
+    IDC_ARROW, IDI_APPLICATION, IMAGE_CURSOR, LR_DEFAULTSIZE, LR_LOADFROMFILE,
+    LR_SHARED, MF_STRING, MSG, PM_REMOVE, SW_SHOW, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+    TPM_RETURNCMD, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::Win32::Graphics::Gdi::{GetStockObject, HBRUSH};
 
 const WM_TRAYICON: u32 = 0x8001;
-const ID_TRAY_SHOW: i32 = 1001;
 const ID_TRAY_EXIT: i32 = 1002;
 
-pub fn start_tray_thread(tx: Sender<TrayCmd>, running: Arc<AtomicBool>) {
+/// 共享标志：主窗口是否可见。托盘线程显示窗口时设为 true，应用隐藏时设为 false
+static WINDOW_VISIBLE: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+
+pub fn start_tray_thread(running: Arc<AtomicBool>, window_visible: Arc<AtomicBool>) {
+    let _ = WINDOW_VISIBLE.set(window_visible);
     thread::spawn(move || {
-        tray_thread(tx, running);
+        tray_thread(running);
     });
 }
 
@@ -35,12 +37,35 @@ fn encode_utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-// 用于存储 sender 指针的包装
-struct TrayUserData {
-    tx: Sender<TrayCmd>,
+fn find_main_window() -> HWND {
+    let title = encode_utf16("单行阅读器");
+    unsafe { FindWindowW(PCWSTR::null(), PCWSTR::from_raw(title.as_ptr())).unwrap_or(HWND(std::ptr::null_mut())) }
 }
 
-fn tray_thread(tx: Sender<TrayCmd>, running: Arc<AtomicBool>) {
+fn show_main_window() {
+    // 先设置共享标志，让主线程知道窗口已恢复
+    if let Some(flag) = WINDOW_VISIBLE.get() {
+        flag.store(true, Ordering::SeqCst);
+    }
+    let hwnd = find_main_window();
+    if !hwnd.0.is_null() {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+}
+
+fn exit_main_app() {
+    let hwnd = find_main_window();
+    if !hwnd.0.is_null() {
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+fn tray_thread(running: Arc<AtomicBool>) {
     let instance =
         unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap() };
     let hinstance = HINSTANCE(instance.0);
@@ -74,11 +99,6 @@ fn tray_thread(tx: Sender<TrayCmd>, running: Arc<AtomicBool>) {
         RegisterClassW(&wc);
     }
 
-    let user_data = Box::new(TrayUserData {
-        tx: tx.clone(),
-    });
-    let user_data_ptr = Box::into_raw(user_data) as *const std::ffi::c_void;
-
     use windows::core::w;
     let hwnd = match unsafe {
         CreateWindowExW(
@@ -93,32 +113,76 @@ fn tray_thread(tx: Sender<TrayCmd>, running: Arc<AtomicBool>) {
             None,
             None,
             hinstance,
-            Some(user_data_ptr),
+            None,
         )
     } {
         Ok(h) => h,
         Err(_) => {
-            let _ = tx.send(TrayCmd::Exit);
+            eprintln!("[tray] failed to create hidden window");
             return;
         }
     };
 
-    // 加载系统图标用于托盘 - 使用 LoadImageW 获取 16x16 小图标
-    let hicon = match unsafe {
-        LoadImageW(
-            HINSTANCE::default(),
-            IDI_APPLICATION,
-            IMAGE_ICON,
-            16,  // 小图标宽度 (SM_CXSMICON)
-            16,  // 小图标高度 (SM_CYSMICON)
-            LR_SHARED,
-        )
-    } {
-        Ok(h) => HICON(h.0),
-        Err(e) => {
-            eprintln!("[tray] LoadImageW failed: {:?}", e);
-            HICON::default()
+    // 加载自定义图标用于托盘，失败时回退到系统默认图标
+    let hicon = {
+        let exe_dir = std::env::current_exe()
+            .unwrap_or_default()
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        let cwd = std::env::current_dir().unwrap_or_default();
+
+        // 尝试多个路径查找图标
+        let candidate_paths = vec![
+            exe_dir.join("resources").join("reader.ico"),
+            cwd.join("resources").join("reader.ico"),
+        ];
+
+        let mut loaded = None;
+        for icon_path in &candidate_paths {
+            let icon_path_str = icon_path.to_string_lossy().to_string();
+            let icon_wide = encode_utf16(&icon_path_str);
+            match unsafe {
+                LoadImageW(
+                    HINSTANCE::default(),
+                    PCWSTR::from_raw(icon_wide.as_ptr()),
+                    IMAGE_ICON,
+                    16,
+                    16,
+                    LR_LOADFROMFILE,
+                )
+            } {
+                Ok(h) if !h.is_invalid() => {
+                    eprintln!("[tray] loaded icon from '{}'", icon_path_str);
+                    loaded = Some(HICON(h.0));
+                    break;
+                }
+                _ => {
+                    eprintln!("[tray] icon not found at '{}'", icon_path_str);
+                }
+            }
         }
+
+        loaded.unwrap_or_else(|| {
+            // 回退到系统默认应用图标
+            eprintln!("[tray] falling back to IDI_APPLICATION");
+            match unsafe {
+                LoadImageW(
+                    HINSTANCE::default(),
+                    IDI_APPLICATION,
+                    IMAGE_ICON,
+                    16,
+                    16,
+                    LR_SHARED,
+                )
+            } {
+                Ok(h) => HICON(h.0),
+                Err(e) => {
+                    eprintln!("[tray] IDI_APPLICATION also failed: {:?}", e);
+                    HICON::default()
+                }
+            }
+        })
     };
 
     let mut nid = NOTIFYICONDATAW {
@@ -169,11 +233,6 @@ fn tray_thread(tx: Sender<TrayCmd>, running: Arc<AtomicBool>) {
     unsafe {
         let _ = PostQuitMessage(0);
     }
-
-    // 释放 user data
-    unsafe {
-        let _ = Box::from_raw(user_data_ptr as *mut TrayUserData);
-    }
 }
 
 unsafe extern "system" fn tray_wndproc(
@@ -183,51 +242,16 @@ unsafe extern "system" fn tray_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_CREATE => {
-            let cs =
-                &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW);
-            let user_data_ptr = cs.lpCreateParams;
-            if !user_data_ptr.is_null() {
-                unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
-                        hwnd,
-                        windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
-                        user_data_ptr as isize,
-                    );
-                }
-            }
-            LRESULT(0)
-        }
+        WM_CREATE => LRESULT(0),
         WM_TRAYICON => {
             let event = (lparam.0 & 0xFFFF) as u32;
-            let ptr = unsafe {
-                windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
-                    hwnd,
-                    windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
-                )
-            };
-            let tx = if ptr != 0 {
-                let data = &*(ptr as *const TrayUserData);
-                Some(data.tx.clone())
-            } else {
-                None
-            };
 
             if event == WM_LBUTTONDBLCLK {
-                if let Some(tx) = tx {
-                    let _ = tx.send(TrayCmd::ToggleVisibility);
-                }
+                show_main_window();
             } else if event == WM_RBUTTONUP {
                 let menu = unsafe { CreatePopupMenu().unwrap() };
-                let show_hide = encode_utf16("显示/隐藏");
                 let exit = encode_utf16("退出");
                 unsafe {
-                    let _ = AppendMenuW(
-                        menu,
-                        MF_STRING,
-                        ID_TRAY_SHOW as usize,
-                        PCWSTR::from_raw(show_hide.as_ptr()),
-                    );
                     let _ = AppendMenuW(
                         menu,
                         MF_STRING,
@@ -245,7 +269,7 @@ unsafe extern "system" fn tray_wndproc(
                     let _ = SetForegroundWindow(hwnd);
                     let cmd = TrackPopupMenu(
                         menu,
-                        TPM_BOTTOMALIGN | TPM_LEFTALIGN,
+                        TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD,
                         pt.x,
                         pt.y,
                         0,
@@ -254,14 +278,8 @@ unsafe extern "system" fn tray_wndproc(
                     );
                     let _ = DestroyMenu(menu);
 
-                    if cmd.0 == ID_TRAY_SHOW {
-                        if let Some(tx) = &tx {
-                            let _ = tx.send(TrayCmd::ToggleVisibility);
-                        }
-                    } else if cmd.0 == ID_TRAY_EXIT {
-                        if let Some(tx) = &tx {
-                            let _ = tx.send(TrayCmd::Exit);
-                        }
+                    if cmd.0 == ID_TRAY_EXIT {
+                        exit_main_app();
                     }
                 }
             }

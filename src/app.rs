@@ -3,26 +3,21 @@ use crate::state::{AppState, SharedState};
 use egui::{Color32, Context, ViewportCommand};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 pub struct ReaderApp {
     state: SharedState,
-    tray_rx: Receiver<TrayCmd>,
     running: Arc<AtomicBool>,
-}
-
-#[derive(Debug)]
-pub enum TrayCmd {
-    ToggleVisibility,
-    Exit,
+    window_visible: Arc<AtomicBool>,
 }
 
 impl ReaderApp {
-    pub fn new(state: SharedState, tray_rx: Receiver<TrayCmd>, running: Arc<AtomicBool>) -> Self {
+    pub fn new(state: SharedState, running: Arc<AtomicBool>, window_visible: Arc<AtomicBool>) -> Self {
         Self {
             state,
-            tray_rx,
             running,
+            window_visible,
         }
     }
 
@@ -39,25 +34,19 @@ impl ReaderApp {
 
 impl eframe::App for ReaderApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // 处理托盘消息
-        while let Ok(cmd) = self.tray_rx.try_recv() {
-            match cmd {
-                TrayCmd::ToggleVisibility => {
-                    let is_visible = self.with_state(|s| s.is_visible);
-                    ctx.send_viewport_cmd(ViewportCommand::Visible(!is_visible));
-                    self.with_state_mut(|s| s.is_visible = !is_visible);
-                }
-                TrayCmd::Exit => {
-                    self.running.store(false, Ordering::SeqCst);
-                    ctx.send_viewport_cmd(ViewportCommand::Close);
-                }
-            }
-        }
-
         // 检查运行标志
         if !self.running.load(Ordering::SeqCst) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
+        }
+
+        // 同步托盘恢复的窗口可见性
+        if self.window_visible.load(Ordering::SeqCst) {
+            let is_visible = self.with_state(|s| s.is_visible);
+            if !is_visible {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                self.with_state_mut(|s| s.is_visible = true);
+            }
         }
 
         // 处理键盘输入
@@ -101,14 +90,14 @@ impl eframe::App for ReaderApp {
                     ctx.send_viewport_cmd(ViewportCommand::StartDrag);
                 }
 
-                // 右键点击：保存菜单位置并打开菜单
+                // 右键点击：使用 GetCursorPos 获取屏幕绝对坐标打开菜单
                 if response.secondary_clicked() {
-                    if let Some(pos) = ctx.pointer_interact_pos() {
-                        self.with_state_mut(|s| {
-                            s.show_context_menu = true;
-                            s.menu_position = (pos.x, pos.y);
-                        });
-                    }
+                    let mut pt = POINT::default();
+                    unsafe { let _ = GetCursorPos(&mut pt); }
+                    self.with_state_mut(|s| {
+                        s.show_context_menu = true;
+                        s.menu_position = (pt.x as f32, pt.y as f32);
+                    });
                 }
 
                 // 左键点击关闭菜单
@@ -120,6 +109,7 @@ impl eframe::App for ReaderApp {
                 if response.double_clicked() {
                     ctx.send_viewport_cmd(ViewportCommand::Visible(false));
                     self.with_state_mut(|s| s.is_visible = false);
+                    self.window_visible.store(false, Ordering::SeqCst);
                 }
 
                 // 渲染单行文字
@@ -375,6 +365,7 @@ impl eframe::App for ReaderApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.with_state_mut(|s| s.save_history());
+        self.running.store(false, Ordering::SeqCst);
     }
 }
 
@@ -439,9 +430,16 @@ fn ctx_read_only(ctx: &egui::Context) -> std::sync::Arc<egui::InputState> {
 // ---- 独立 viewport 渲染函数 ----
 
 fn render_style_dialog(ctx: &egui::Context, state: &SharedState) -> bool {
+    // 检测原生关闭按钮
+    if ctx.input(|i| i.viewport().close_requested()) {
+        state.lock().unwrap().show_style_dialog = false;
+        return true;
+    }
+
     let mut should_close = false;
 
     egui::CentralPanel::default().show(ctx, |ui| {
+        // 每帧从状态中读取临时值，保证 widget 状态在帧间不丢失
         let (mut bg, mut fg, mut font_name, mut font_size, fonts) = {
             let s = state.lock().unwrap();
             (
@@ -494,26 +492,59 @@ fn render_style_dialog(ctx: &egui::Context, state: &SharedState) -> bool {
                 let mut s = state.lock().unwrap();
                 s.tmp_bg_color = bg;
                 s.tmp_font_color = fg;
-                s.tmp_font_name = font_name;
+                s.tmp_font_name = font_name.clone();
                 s.tmp_font_size = font_size;
                 s.apply_style();
                 s.show_style_dialog = false;
                 should_close = true;
             }
             if ui.button("取消").clicked() {
-                state.lock().unwrap().show_style_dialog = false;
+                // 取消时恢复到配置中的原始值
+                {
+                    let mut s = state.lock().unwrap();
+                    let cfg_bg = crate::config::AppConfig::parse_color(&s.config.style.bg_color);
+                    let cfg_fg = crate::config::AppConfig::parse_color(&s.config.style.font_color);
+                    s.tmp_bg_color = hex_to_rgb_cfg(cfg_bg);
+                    s.tmp_font_color = hex_to_rgb_cfg(cfg_fg);
+                    s.tmp_font_name = s.config.style.font.clone();
+                    s.tmp_font_size = s.config.style.font_size;
+                    s.show_style_dialog = false;
+                }
                 should_close = true;
             }
         });
+
+        // 每帧将临时值写回状态，确保下次渲染保留用户修改
+        {
+            let mut s = state.lock().unwrap();
+            s.tmp_bg_color = bg;
+            s.tmp_font_color = fg;
+            s.tmp_font_name = font_name;
+            s.tmp_font_size = font_size;
+        }
     });
 
     should_close
+}
+
+fn hex_to_rgb_cfg(hex: u32) -> [f32; 3] {
+    [
+        ((hex >> 16) & 0xFF) as f32 / 255.0,
+        ((hex >> 8) & 0xFF) as f32 / 255.0,
+        (hex & 0xFF) as f32 / 255.0,
+    ]
 }
 
 fn render_shortcut_dialog(
     ctx: &egui::Context,
     state: &SharedState,
 ) {
+    // 检测原生关闭按钮
+    if ctx.input(|i| i.viewport().close_requested()) {
+        state.lock().unwrap().show_shortcut_dialog = false;
+        return;
+    }
+
     egui::CentralPanel::default().show(ctx, |ui| {
         let (prev, next, left, right, waiting) = {
             let s = state.lock().unwrap();
@@ -579,6 +610,12 @@ fn render_shortcut_dialog(
 }
 
 fn render_chapter_dialog(ctx: &egui::Context, state: &SharedState) {
+    // 检测原生关闭按钮
+    if ctx.input(|i| i.viewport().close_requested()) {
+        state.lock().unwrap().show_chapter_dialog = false;
+        return;
+    }
+
     let chapters = state.lock().unwrap().chapters.clone();
 
     egui::CentralPanel::default().show(ctx, |ui| {
@@ -605,6 +642,12 @@ fn render_chapter_dialog(ctx: &egui::Context, state: &SharedState) {
 }
 
 fn render_image_dialog(ctx: &egui::Context, state: &SharedState) {
+    // 检测原生关闭按钮
+    if ctx.input(|i| i.viewport().close_requested()) {
+        state.lock().unwrap().show_image_dialog = false;
+        return;
+    }
+
     let has_image_data = {
         let s = state.lock().unwrap();
         s.show_image_dialog && s.get_current_image().is_some()
@@ -652,6 +695,12 @@ fn render_image_dialog(ctx: &egui::Context, state: &SharedState) {
 }
 
 fn render_history_dialog(ctx: &egui::Context, state: &SharedState) {
+    // 检测原生关闭按钮
+    if ctx.input(|i| i.viewport().close_requested()) {
+        state.lock().unwrap().show_history_dialog = false;
+        return;
+    }
+
     let entries = state.lock().unwrap().history_db.get_entries();
     let mut should_close = false;
     let mut jump_to: Option<(String, usize)> = None;
