@@ -301,7 +301,6 @@ impl eframe::App for ReaderApp {
                     .with_always_on_top(),
                 move |vctx, _class| {
                     if menu_visible {
-                        vctx.send_viewport_cmd(ViewportCommand::Position(egui::pos2(px, py)));
                         vctx.send_viewport_cmd(ViewportCommand::Visible(true));
                         egui::CentralPanel::default()
                             .frame(egui::Frame::popup(&vctx.style()))
@@ -442,6 +441,7 @@ impl eframe::App for ReaderApp {
         if self.with_state(|s| s.show_style_dialog) {
             let state = self.state.clone();
             let ctx_clone = ctx.clone();
+            let centered = Arc::new(AtomicBool::new(false));
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("style_dialog"),
@@ -450,8 +450,14 @@ impl eframe::App for ReaderApp {
                     .with_inner_size([380.0, 250.0])
                     .with_resizable(false)
                     .with_maximize_button(false)
-                    .with_minimize_button(false),
+                    .with_minimize_button(false)
+                    .with_always_on_top(),
                 move |vctx, _class| {
+                    if !centered.swap(true, Ordering::Relaxed) {
+                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
+                            vctx.send_viewport_cmd(cmd);
+                        }
+                    }
                     let should_close = render_style_dialog(vctx, &state);
                     if should_close {
                         ctx_clone.request_repaint();
@@ -463,6 +469,7 @@ impl eframe::App for ReaderApp {
         // 快捷键设置对话框（独立 viewport）
         if self.with_state(|s| s.show_shortcut_dialog) {
             let state = self.state.clone();
+            let centered = Arc::new(AtomicBool::new(false));
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("shortcut_dialog"),
@@ -471,8 +478,14 @@ impl eframe::App for ReaderApp {
                     .with_inner_size([240.0, 160.0])
                     .with_resizable(false)
                     .with_maximize_button(false)
-                    .with_minimize_button(false),
+                    .with_minimize_button(false)
+                    .with_always_on_top(),
                 move |vctx, _class| {
+                    if !centered.swap(true, Ordering::Relaxed) {
+                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
+                            vctx.send_viewport_cmd(cmd);
+                        }
+                    }
                     render_shortcut_dialog(vctx, &state);
                 },
             );
@@ -481,14 +494,21 @@ impl eframe::App for ReaderApp {
         // 正则表达式对话框（独立 viewport）
         if self.with_state(|s| s.show_regex_dialog) {
             let state = self.state.clone();
+            let centered = Arc::new(AtomicBool::new(false));
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("regex_dialog"),
                 egui::ViewportBuilder::default()
                     .with_title("正则表达式管理")
                     .with_inner_size([500.0, 400.0])
-                    .with_resizable(true),
+                    .with_resizable(true)
+                    .with_always_on_top(),
                 move |vctx, _class| {
+                    if !centered.swap(true, Ordering::Relaxed) {
+                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
+                            vctx.send_viewport_cmd(cmd);
+                        }
+                    }
                     render_regex_dialog(vctx, &state);
                 },
             );
@@ -497,14 +517,21 @@ impl eframe::App for ReaderApp {
         // 章节列表对话框（独立 viewport）
         if self.with_state(|s| s.show_chapter_dialog) {
             let state = self.state.clone();
+            let centered = Arc::new(AtomicBool::new(false));
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("chapter_dialog"),
                 egui::ViewportBuilder::default()
                     .with_title("章节列表")
                     .with_inner_size([300.0, 400.0])
-                    .with_resizable(true),
+                    .with_resizable(true)
+                    .with_always_on_top(),
                 move |vctx, _class| {
+                    if !centered.swap(true, Ordering::Relaxed) {
+                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
+                            vctx.send_viewport_cmd(cmd);
+                        }
+                    }
                     render_chapter_dialog(vctx, &state);
                 },
             );
@@ -537,13 +564,21 @@ impl eframe::App for ReaderApp {
                 let win_w = (img_w * scale).max(200.0);
                 let win_h = (img_h * scale).max(150.0);
 
+                let centered = Arc::new(AtomicBool::new(false));
+
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("image_dialog"),
                     egui::ViewportBuilder::default()
                         .with_title("图片")
                         .with_inner_size([win_w, win_h])
-                        .with_resizable(true),
+                        .with_resizable(true)
+                        .with_always_on_top(),
                     move |vctx, _class| {
+                        if !centered.swap(true, Ordering::Relaxed) {
+                            if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
+                                vctx.send_viewport_cmd(cmd);
+                            }
+                        }
                         render_image_dialog(vctx, &state);
                     },
                 );
@@ -556,14 +591,21 @@ impl eframe::App for ReaderApp {
         // 历史记录对话框（独立 viewport）
         if self.with_state(|s| s.show_history_dialog) {
             let state = self.state.clone();
+            let centered = Arc::new(AtomicBool::new(false));
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("history_dialog"),
                 egui::ViewportBuilder::default()
                     .with_title("阅读历史")
                     .with_inner_size([500.0, 400.0])
-                    .with_resizable(true),
+                    .with_resizable(true)
+                    .with_always_on_top(),
                 move |vctx, _class| {
+                    if !centered.swap(true, Ordering::Relaxed) {
+                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
+                            vctx.send_viewport_cmd(cmd);
+                        }
+                    }
                     render_history_dialog(vctx, &state);
                 },
             );
