@@ -280,12 +280,13 @@ impl eframe::App for ReaderApp {
 
         // ---- 独立 viewport 窗口 ----
 
-        // 右键菜单（独立 viewport）
-        if self.with_state(|s| s.show_context_menu) {
+        // 右键菜单（独立 viewport — 始终存在，通过显隐切换避免创建时的闪烁）
+        {
             let state = self.state.clone();
             let running = self.running.clone();
             let cached_top = self.cached_always_on_top;
             let (px, py) = self.with_state(|s| s.menu_position);
+            let menu_visible = self.with_state(|s| s.show_context_menu);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("context_menu"),
@@ -299,123 +300,140 @@ impl eframe::App for ReaderApp {
                     .with_minimize_button(false)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::popup(&vctx.style()))
-                        .show(vctx, |ui| {
-                            ui.set_min_width(160.0);
+                    if menu_visible {
+                        vctx.send_viewport_cmd(ViewportCommand::Position(egui::pos2(px, py)));
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                        egui::CentralPanel::default()
+                            .frame(egui::Frame::popup(&vctx.style()))
+                            .show(vctx, |ui| {
+                                ui.set_min_width(160.0);
 
-                            // 选择文件 → 本地文件
-                            if ui.button("选择本地文件").clicked() {
-                                let state_inner = state.clone();
-                                std::thread::spawn(move || {
-                                    if let Some(path) = rfd::FileDialog::new()
-                                        .add_filter("文档", &["txt", "epub", "docx", "doc"])
-                                        .pick_file()
-                                    {
-                                        let mut s = state_inner.lock().unwrap();
-                                        s.load_file(&path);
-                                    }
-                                });
-                                state.lock().unwrap().show_context_menu = false;
-                                vctx.send_viewport_cmd(ViewportCommand::Close);
-                            }
-
-                            // 历史记录
-                            if ui.button("历史记录").clicked() {
-                                state.lock().unwrap().show_context_menu = false;
-                                state.lock().unwrap().show_history_dialog = true;
-                                vctx.send_viewport_cmd(ViewportCommand::Close);
-                            }
-
-                            ui.separator();
-
-                            // 置顶
-                            let top_label = if cached_top { "取消置顶" } else { "置顶" };
-                            if ui.button(top_label).clicked() {
-                                let new_top = !cached_top;
-                                let mut cfg = crate::config::AppConfig::global().lock().unwrap();
-                                cfg.always_on_top = new_top;
-                                let _ = cfg.save();
-                                drop(cfg);
-                                // 设置待应用的置顶状态，由主 update 循环实际应用
-                                state.lock().unwrap().pending_always_on_top = Some(new_top);
-                                state.lock().unwrap().show_context_menu = false;
-                                vctx.send_viewport_cmd(ViewportCommand::Close);
-                            }
-
-                            ui.separator();
-
-                            // 章节跳转
-                            let has_chapters = !state.lock().unwrap().chapters.is_empty();
-                            if has_chapters {
-                                if ui.button("跳转到章节").clicked() {
+                                // 选择文件 → 本地文件
+                                if ui.button("选择本地文件").clicked() {
+                                    let state_inner = state.clone();
+                                    std::thread::spawn(move || {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("文档", &["txt", "epub", "docx", "doc"])
+                                            .pick_file()
+                                        {
+                                            let mut s = state_inner.lock().unwrap();
+                                            s.load_file(&path);
+                                        }
+                                    });
                                     state.lock().unwrap().show_context_menu = false;
-                                    state.lock().unwrap().show_chapter_dialog = true;
-                                    vctx.send_viewport_cmd(ViewportCommand::Close);
+                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                                 }
-                            } else {
-                                ui.add_enabled(false, egui::Button::new("跳转到章节(无章节)"));
-                            }
 
-                            // 样式设置
-                            if ui.button("样式设置").clicked() {
-                                let cfg = crate::config::AppConfig::global().lock().unwrap();
-                                let bg = AppConfig::parse_color(&cfg.style.bg_color);
-                                let fg = AppConfig::parse_color(&cfg.style.font_color);
-                                let font = cfg.style.font.clone();
-                                let size = cfg.style.font_size;
-                                drop(cfg); // 释放 Config 锁
-                                let mut s = state.lock().unwrap();
-                                s.show_context_menu = false;
-                                s.tmp_bg_color = [
-                                    ((bg >> 16) & 0xFF) as f32 / 255.0,
-                                    ((bg >> 8) & 0xFF) as f32 / 255.0,
-                                    (bg & 0xFF) as f32 / 255.0,
-                                ];
-                                s.tmp_font_color = [
-                                    ((fg >> 16) & 0xFF) as f32 / 255.0,
-                                    ((fg >> 8) & 0xFF) as f32 / 255.0,
-                                    (fg & 0xFF) as f32 / 255.0,
-                                ];
-                                s.tmp_font_name = font;
-                                s.tmp_font_size = size;
-                                s.show_style_dialog = true;
-                                vctx.send_viewport_cmd(ViewportCommand::Close);
-                            }
+                                // 刷新当前文件
+                                let has_file = state.lock().unwrap().current_file_path.is_some();
+                                if has_file {
+                                    if ui.button("刷新").clicked() {
+                                        let mut s = state.lock().unwrap();
+                                        s.refresh_current_file();
+                                        s.show_context_menu = false;
+                                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                                    }
+                                } else {
+                                    ui.add_enabled(false, egui::Button::new("刷新(无文件)"));
+                                }
 
-                            // 快捷键设置
-                            if ui.button("快捷键设置").clicked() {
-                                state.lock().unwrap().show_context_menu = false;
-                                state.lock().unwrap().show_shortcut_dialog = true;
-                                vctx.send_viewport_cmd(ViewportCommand::Close);
-                            }
+                                // 历史记录
+                                if ui.button("历史记录").clicked() {
+                                    state.lock().unwrap().show_context_menu = false;
+                                    state.lock().unwrap().show_history_dialog = true;
+                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                                }
 
-                            // 正则表达式
-                            if ui.button("正则表达式").clicked() {
-                                // 同步 regex_list
-                                let patterns = crate::regex_config::RegexConfig::global()
-                                    .lock()
-                                    .unwrap()
-                                    .patterns
-                                    .clone();
-                                let mut s = state.lock().unwrap();
-                                s.show_context_menu = false;
-                                s.regex_list = patterns;
-                                s.regex_test_result = None;
-                                s.show_regex_dialog = true;
-                                vctx.send_viewport_cmd(ViewportCommand::Close);
-                            }
+                                ui.separator();
 
-                            ui.separator();
+                                // 置顶
+                                let top_label = if cached_top { "取消置顶" } else { "置顶" };
+                                if ui.button(top_label).clicked() {
+                                    let new_top = !cached_top;
+                                    let mut cfg = crate::config::AppConfig::global().lock().unwrap();
+                                    cfg.always_on_top = new_top;
+                                    let _ = cfg.save();
+                                    drop(cfg);
+                                    state.lock().unwrap().pending_always_on_top = Some(new_top);
+                                    state.lock().unwrap().show_context_menu = false;
+                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                                }
 
-                            // 退出
-                            if ui.button("退出").clicked() {
-                                let s = state.lock().unwrap();
-                                s.save_current_history();
-                                running.store(false, Ordering::SeqCst);
-                                vctx.send_viewport_cmd(ViewportCommand::Close);
-                            }
-                        });
+                                ui.separator();
+
+                                // 章节跳转
+                                let has_chapters = !state.lock().unwrap().chapters.is_empty();
+                                if has_chapters {
+                                    if ui.button("跳转到章节").clicked() {
+                                        state.lock().unwrap().show_context_menu = false;
+                                        state.lock().unwrap().show_chapter_dialog = true;
+                                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                                    }
+                                } else {
+                                    ui.add_enabled(false, egui::Button::new("跳转到章节(无章节)"));
+                                }
+
+                                // 样式设置
+                                if ui.button("样式设置").clicked() {
+                                    let cfg = crate::config::AppConfig::global().lock().unwrap();
+                                    let bg = AppConfig::parse_color(&cfg.style.bg_color);
+                                    let fg = AppConfig::parse_color(&cfg.style.font_color);
+                                    let font = cfg.style.font.clone();
+                                    let size = cfg.style.font_size;
+                                    drop(cfg);
+                                    let mut s = state.lock().unwrap();
+                                    s.show_context_menu = false;
+                                    s.tmp_bg_color = [
+                                        ((bg >> 16) & 0xFF) as f32 / 255.0,
+                                        ((bg >> 8) & 0xFF) as f32 / 255.0,
+                                        (bg & 0xFF) as f32 / 255.0,
+                                    ];
+                                    s.tmp_font_color = [
+                                        ((fg >> 16) & 0xFF) as f32 / 255.0,
+                                        ((fg >> 8) & 0xFF) as f32 / 255.0,
+                                        (fg & 0xFF) as f32 / 255.0,
+                                    ];
+                                    s.tmp_font_name = font;
+                                    s.tmp_font_size = size;
+                                    s.show_style_dialog = true;
+                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                                }
+
+                                // 快捷键设置
+                                if ui.button("快捷键设置").clicked() {
+                                    state.lock().unwrap().show_context_menu = false;
+                                    state.lock().unwrap().show_shortcut_dialog = true;
+                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                                }
+
+                                // 正则表达式
+                                if ui.button("正则表达式").clicked() {
+                                    let patterns = crate::regex_config::RegexConfig::global()
+                                        .lock()
+                                        .unwrap()
+                                        .patterns
+                                        .clone();
+                                    let mut s = state.lock().unwrap();
+                                    s.show_context_menu = false;
+                                    s.regex_list = patterns;
+                                    s.regex_test_result = None;
+                                    s.show_regex_dialog = true;
+                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                                }
+
+                                ui.separator();
+
+                                // 退出
+                                if ui.button("退出").clicked() {
+                                    let s = state.lock().unwrap();
+                                    s.save_current_history();
+                                    running.store(false, Ordering::SeqCst);
+                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                                }
+                            });
+                    } else {
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                    }
                 },
             );
         }

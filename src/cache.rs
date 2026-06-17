@@ -31,6 +31,12 @@ impl Cache {
     pub fn put_chapters(&mut self, path: &str, chapters: Vec<crate::chapter::Chapter>) {
         self.chapter_cache.insert(path.to_string(), chapters);
     }
+
+    /// 清除指定路径的缓存（用于刷新文件时强制重新解析）
+    pub fn clear_entry(&mut self, path: &str) {
+        self.content_cache.remove(path);
+        self.chapter_cache.remove(path);
+    }
 }
 
 impl Default for Cache {

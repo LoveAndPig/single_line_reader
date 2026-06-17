@@ -138,6 +138,66 @@ impl AppState {
         true
     }
 
+    /// 刷新当前文件：清除缓存后重新解析，适用于文件被外部修改或新增正则表达式时
+    /// 如果文件已不存在则回到无文件状态，返回 false
+    pub fn refresh_current_file(&mut self) -> bool {
+        let path_str = match &self.current_file_path {
+            Some(p) => p.clone(),
+            None => return false,
+        };
+
+        let path = PathBuf::from(&path_str);
+        if !path.exists() {
+            // 文件已不存在，回到初始状态
+            self.current_file_path = None;
+            self.current_file_name = None;
+            self.lines.clear();
+            self.chapters.clear();
+            self.images.clear();
+            self.current_line = 0;
+            self.scroll_offset = 0.0;
+            self.max_scroll_offset = 0.0;
+            self.cache.clear_entry(&path_str);
+            return false;
+        }
+
+        // 保存当前进度
+        self.save_current_history();
+        let saved_line = self.current_line;
+
+        // 清除缓存，强制重新解析
+        self.cache.clear_entry(&path_str);
+
+        // 重新加载
+        match parser::parse_file(&path) {
+            Some(result) => {
+                self.lines = result.lines;
+                self.images = result.images;
+                let chapters = crate::chapter::detect_chapters(&self.lines);
+                self.cache.put_content(&path_str, self.lines.clone());
+                self.cache.put_chapters(&path_str, chapters.clone());
+                self.chapters = chapters;
+                // 尝试恢复到刷新前的行号
+                self.current_line = saved_line.min(self.lines.len().saturating_sub(1));
+                self.scroll_offset = 0.0;
+                self.max_scroll_offset = 0.0;
+                true
+            }
+            None => {
+                // 解析失败，同样回到无文件状态
+                self.current_file_path = None;
+                self.current_file_name = None;
+                self.lines.clear();
+                self.chapters.clear();
+                self.images.clear();
+                self.current_line = 0;
+                self.scroll_offset = 0.0;
+                self.max_scroll_offset = 0.0;
+                false
+            }
+        }
+    }
+
     /// 保存历史记录（静态方法，不持有 AppState 锁，避免与 HistoryManager 死锁）
     pub fn save_history(
         file_name: Option<&str>,
