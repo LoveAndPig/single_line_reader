@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
@@ -10,11 +11,19 @@ pub struct HistoryEntry {
     pub updated_at: String,
 }
 
+/// 全局单例
+static INSTANCE: std::sync::OnceLock<Mutex<HistoryManager>> = std::sync::OnceLock::new();
+
 pub struct HistoryManager {
     conn: Connection,
 }
 
 impl HistoryManager {
+    /// 获取全局单例
+    pub fn global() -> &'static Mutex<Self> {
+        INSTANCE.get_or_init(|| Mutex::new(Self::new()))
+    }
+
     pub fn new() -> Self {
         let db_path = get_history_path();
         let conn = Connection::open(&db_path).expect("Failed to open history database");

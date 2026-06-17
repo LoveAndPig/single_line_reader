@@ -8,8 +8,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 pub struct AppState {
-    pub config: AppConfig,
-    pub history_db: HistoryManager,
     pub cache: Cache,
 
     pub current_file_path: Option<String>,
@@ -17,6 +15,7 @@ pub struct AppState {
     pub lines: Vec<String>,
     pub current_line: usize,
     pub scroll_offset: f32,
+    pub max_scroll_offset: f32,
     pub chapters: Vec<Chapter>,
     pub images: Vec<ImageInfo>,
 
@@ -40,25 +39,34 @@ pub struct AppState {
     // 快捷键编辑临时值
     pub waiting_key: Option<(usize, String)>,
 
+    // 取色器状态：Some(target) 表示正在取色，target: 0=bg, 1=fg
+    pub color_picking: Option<usize>,
+
     // 系统字体列表
     pub fonts: Vec<String>,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        let config = AppConfig::load();
-        let bg = AppConfig::parse_color(&config.style.bg_color);
-        let fg = AppConfig::parse_color(&config.style.font_color);
+        crate::config::AppConfig::global();
+        let bg = AppConfig::parse_color(
+            &crate::config::AppConfig::global().lock().unwrap().style.bg_color,
+        );
+        let fg = AppConfig::parse_color(
+            &crate::config::AppConfig::global().lock().unwrap().style.font_color,
+        );
 
-        Self {
-            config: config.clone(),
-            history_db: HistoryManager::new(),
+        let font_name = crate::config::AppConfig::global().lock().unwrap().style.font.clone();
+        let font_size = crate::config::AppConfig::global().lock().unwrap().style.font_size;
+
+        let result = Self {
             cache: Cache::new(),
             current_file_path: None,
             current_file_name: None,
             lines: Vec::new(),
             current_line: 0,
             scroll_offset: 0.0,
+            max_scroll_offset: 0.0,
             chapters: Vec::new(),
             images: Vec::new(),
             is_visible: true,
@@ -71,11 +79,13 @@ impl AppState {
             menu_position: (0.0, 0.0),
             tmp_bg_color: hex_to_rgb(bg),
             tmp_font_color: hex_to_rgb(fg),
-            tmp_font_name: config.style.font.clone(),
-            tmp_font_size: config.style.font_size,
+            tmp_font_name: font_name,
+            tmp_font_size: font_size,
             waiting_key: None,
+            color_picking: None,
             fonts: Vec::new(),
-        }
+        };
+        result
     }
 
     pub fn load_file(&mut self, path: &PathBuf) -> bool {
@@ -83,7 +93,7 @@ impl AppState {
 
         // 如果打开的文件与当前不同，先保存当前阅读进度
         if self.current_file_path.as_deref() != Some(&path_str) {
-            self.save_history();
+            self.save_current_history();
         }
 
         if let Some(cached_lines) = self.cache.get_content(&path_str) {
@@ -112,13 +122,29 @@ impl AppState {
         true
     }
 
-    pub fn save_history(&mut self) {
-        if let (Some(ref name), Some(ref path)) =
-            (&self.current_file_name, &self.current_file_path)
-        {
-            self.history_db
-                .add_entry(name, path, self.current_line, self.lines.len());
+    /// 保存历史记录（静态方法，不持有 AppState 锁，避免与 HistoryManager 死锁）
+    pub fn save_history(
+        file_name: Option<&str>,
+        file_path: Option<&str>,
+        current_line: usize,
+        total_lines: usize,
+    ) {
+        if let (Some(name), Some(path)) = (file_name, file_path) {
+            HistoryManager::global()
+                .lock()
+                .unwrap()
+                .add_entry(name, path, current_line, total_lines);
         }
+    }
+
+    /// 便捷方法：从当前状态提取信息并保存
+    pub fn save_current_history(&self) {
+        Self::save_history(
+            self.current_file_name.as_deref(),
+            self.current_file_path.as_deref(),
+            self.current_line,
+            self.lines.len(),
+        );
     }
 
     pub fn current_line_text(&self) -> String {
@@ -154,6 +180,7 @@ impl AppState {
         if self.current_line + 1 < self.lines.len() {
             self.current_line += 1;
             self.scroll_offset = 0.0;
+            self.max_scroll_offset = 0.0;
         }
     }
 
@@ -161,6 +188,7 @@ impl AppState {
         if self.current_line > 0 {
             self.current_line -= 1;
             self.scroll_offset = 0.0;
+            self.max_scroll_offset = 0.0;
         }
     }
 
@@ -169,22 +197,24 @@ impl AppState {
     }
 
     pub fn scroll_right(&mut self) {
-        self.scroll_offset += 30.0;
+        self.scroll_offset = (self.scroll_offset + 30.0).min(self.max_scroll_offset);
     }
 
     pub fn goto_line(&mut self, line: usize) {
         if line < self.lines.len() {
             self.current_line = line;
             self.scroll_offset = 0.0;
+            self.max_scroll_offset = 0.0;
         }
     }
 
-    pub fn apply_style(&mut self) {
-        self.config.style.bg_color = rgb_to_hex(self.tmp_bg_color);
-        self.config.style.font_color = rgb_to_hex(self.tmp_font_color);
-        self.config.style.font = self.tmp_font_name.clone();
-        self.config.style.font_size = self.tmp_font_size;
-        let _ = self.config.save();
+    pub fn apply_style(&self) {
+        let mut cfg = crate::config::AppConfig::global().lock().unwrap();
+        cfg.style.bg_color = rgb_to_hex(self.tmp_bg_color);
+        cfg.style.font_color = rgb_to_hex(self.tmp_font_color);
+        cfg.style.font = self.tmp_font_name.clone();
+        cfg.style.font_size = self.tmp_font_size;
+        let _ = cfg.save();
     }
 }
 

@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 const CONFIG_FILE: &str = "config.json";
+
+/// 全局单例
+static INSTANCE: std::sync::OnceLock<Mutex<AppConfig>> = std::sync::OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StyleConfig {
@@ -63,6 +67,11 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// 获取全局单例（首次调用时自动从磁盘加载）
+    pub fn global() -> &'static Mutex<Self> {
+        INSTANCE.get_or_init(|| Mutex::new(Self::load()))
+    }
+
     pub fn config_path() -> PathBuf {
         std::env::current_exe()
             .unwrap_or_default()

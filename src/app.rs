@@ -10,15 +10,62 @@ pub struct ReaderApp {
     state: SharedState,
     running: Arc<AtomicBool>,
     window_visible: Arc<AtomicBool>,
+    // 缓存配置值，避免每帧加锁读取
+    cached_font_size: u32,
+    cached_bg: Color32,
+    cached_fg: Color32,
+    cached_always_on_top: bool,
+    cached_shortcuts: crate::config::ShortcutConfig,
 }
 
 impl ReaderApp {
-    pub fn new(state: SharedState, running: Arc<AtomicBool>, window_visible: Arc<AtomicBool>) -> Self {
-        Self {
+    pub fn new(
+        state: SharedState,
+        running: Arc<AtomicBool>,
+        window_visible: Arc<AtomicBool>,
+    ) -> Self {
+        let cfg = crate::config::AppConfig::global().lock().unwrap();
+        let bg = AppConfig::parse_color(&cfg.style.bg_color);
+        let fg = AppConfig::parse_color(&cfg.style.font_color);
+        let result = Self {
             state,
             running,
             window_visible,
-        }
+            cached_font_size: cfg.style.font_size,
+            cached_bg: Color32::from_rgb(
+                ((bg >> 16) & 0xFF) as u8,
+                ((bg >> 8) & 0xFF) as u8,
+                (bg & 0xFF) as u8,
+            ),
+            cached_fg: Color32::from_rgb(
+                ((fg >> 16) & 0xFF) as u8,
+                ((fg >> 8) & 0xFF) as u8,
+                (fg & 0xFF) as u8,
+            ),
+            cached_always_on_top: cfg.always_on_top,
+            cached_shortcuts: cfg.shortcuts.clone(),
+        };
+        result
+    }
+
+    /// 从全局配置刷新所有缓存值
+    fn refresh_config_cache(&mut self) {
+        let cfg = crate::config::AppConfig::global().lock().unwrap();
+        let bg = AppConfig::parse_color(&cfg.style.bg_color);
+        let fg = AppConfig::parse_color(&cfg.style.font_color);
+        self.cached_font_size = cfg.style.font_size;
+        self.cached_bg = Color32::from_rgb(
+            ((bg >> 16) & 0xFF) as u8,
+            ((bg >> 8) & 0xFF) as u8,
+            (bg & 0xFF) as u8,
+        );
+        self.cached_fg = Color32::from_rgb(
+            ((fg >> 16) & 0xFF) as u8,
+            ((fg >> 8) & 0xFF) as u8,
+            (fg & 0xFF) as u8,
+        );
+        self.cached_always_on_top = cfg.always_on_top;
+        self.cached_shortcuts = cfg.shortcuts.clone();
     }
 
     fn with_state<R>(&self, f: impl FnOnce(&AppState) -> R) -> R {
@@ -34,10 +81,35 @@ impl ReaderApp {
 
 impl eframe::App for ReaderApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.refresh_config_cache();
+
         // 检查运行标志
         if !self.running.load(Ordering::SeqCst) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
+        }
+
+        // 处理屏幕取色
+        let picking = self.with_state(|s| s.color_picking);
+        if let Some(target) = picking {
+            // 清除取色状态（避免重复触发）
+            self.with_state_mut(|s| s.color_picking = None);
+
+            let state_clone = self.state.clone();
+            std::thread::spawn(move || {
+                let hwnd = crate::color_picker::find_viewport_hwnd();
+                if let Some([r, g, b]) = crate::color_picker::pick_screen_color(hwnd) {
+                    let mut s = state_clone.lock().unwrap();
+                    let color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0];
+                    match target {
+                        0 => s.tmp_bg_color = color,
+                        1 => s.tmp_font_color = color,
+                        _ => {}
+                    }
+                    // 重新打开样式对话框
+                    s.show_style_dialog = true;
+                }
+            });
         }
 
         // 同步托盘恢复的窗口可见性
@@ -52,25 +124,9 @@ impl eframe::App for ReaderApp {
         // 处理键盘输入
         self.handle_keyboard(&*ctx_read_only(ctx));
 
-        // 主面板 - 单行文字显示
-        let bg = {
-            let s = self.state.lock().unwrap();
-            let hex = AppConfig::parse_color(&s.config.style.bg_color);
-            Color32::from_rgb(
-                ((hex >> 16) & 0xFF) as u8,
-                ((hex >> 8) & 0xFF) as u8,
-                (hex & 0xFF) as u8,
-            )
-        };
-        let fg = {
-            let s = self.state.lock().unwrap();
-            let hex = AppConfig::parse_color(&s.config.style.font_color);
-            Color32::from_rgb(
-                ((hex >> 16) & 0xFF) as u8,
-                ((hex >> 8) & 0xFF) as u8,
-                (hex & 0xFF) as u8,
-            )
-        };
+        // 主面板 - 单行文字显示（使用缓存值，无需每帧加锁）
+        let bg = self.cached_bg;
+        let fg = self.cached_fg;
 
         let frame = egui::Frame::central_panel(&ctx.style())
             .fill(bg)
@@ -100,9 +156,20 @@ impl eframe::App for ReaderApp {
                     });
                 }
 
-                // 左键点击关闭菜单
+                // 左键点击：如果是图片行则显示图片，否则关闭菜单
                 if response.clicked() {
-                    self.with_state_mut(|s| s.show_context_menu = false);
+                    let is_image_line = {
+                        let s = self.state.lock().unwrap();
+                        s.get_current_image().is_some()
+                    };
+                    if is_image_line {
+                        self.with_state_mut(|s| {
+                            s.show_context_menu = false;
+                            s.show_image_dialog = true;
+                        });
+                    } else {
+                        self.with_state_mut(|s| s.show_context_menu = false);
+                    }
                 }
 
                 // 双击隐藏到托盘
@@ -113,13 +180,13 @@ impl eframe::App for ReaderApp {
                 }
 
                 // 渲染单行文字
-                let (text, _font_name, font_size, scroll_offset) = {
+                let font_size = self.cached_font_size;
+                let (text, scroll_offset, is_image_line) = {
                     let s = self.state.lock().unwrap();
                     (
                         s.current_line_text(),
-                        s.config.style.font.clone(),
-                        s.config.style.font_size,
                         s.scroll_offset,
+                        s.get_current_image().is_some(),
                     )
                 };
 
@@ -127,11 +194,29 @@ impl eframe::App for ReaderApp {
                 let galley = ui.painter().layout(
                     text.clone(),
                     egui::FontId::proportional(font_size as f32),
-                    fg,
+                    if is_image_line {
+                        // 图片行使用醒目的蓝色+下划线样式
+                        Color32::from_rgb(100, 180, 255)
+                    } else {
+                        fg
+                    },
                     f32::INFINITY,
                 );
 
+                let text_width = galley.size().x;
                 let text_height = galley.size().y;
+
+                // 计算最大滚动偏移量：文字宽度超过可用宽度时，允许滚动超出部分
+                let max_scroll = (text_width - available.x).max(0.0);
+
+                // 将 max_scroll_offset 存回 state，供 scroll_left/scroll_right 使用
+                {
+                    let mut s = self.state.lock().unwrap();
+                    let clamped_offset = scroll_offset.clamp(0.0, max_scroll);
+                    s.scroll_offset = clamped_offset;
+                    s.max_scroll_offset = max_scroll;
+                }
+
                 let y_offset = (available.y - text_height) / 2.0;
                 if y_offset > 0.0 {
                     ui.add_space(y_offset);
@@ -142,10 +227,28 @@ impl eframe::App for ReaderApp {
                 ui.painter().with_clip_rect(clip_rect);
 
                 let pos = egui::pos2(
-                    ui.max_rect().left() - scroll_offset,
+                    ui.max_rect().left() - {
+                        let s = self.state.lock().unwrap();
+                        s.scroll_offset
+                    },
                     ui.next_widget_position().y,
                 );
-                ui.painter().galley(pos, galley, fg);
+                ui.painter().galley(pos, galley, if is_image_line {
+                    Color32::from_rgb(100, 180, 255)
+                } else {
+                    fg
+                });
+
+                // 图片行添加下划线提示可点击
+                if is_image_line {
+                    let underline_y = pos.y + text_height + 1.0;
+                    let underline_p1 = egui::pos2(pos.x, underline_y);
+                    let underline_p2 = egui::pos2((pos.x + text_width).min(ui.max_rect().right()), underline_y);
+                    ui.painter().line_segment(
+                        [underline_p1, underline_p2],
+                        egui::Stroke::new(1.5, Color32::from_rgb(100, 180, 255)),
+                    );
+                }
             });
 
         // ---- 独立 viewport 窗口 ----
@@ -154,6 +257,7 @@ impl eframe::App for ReaderApp {
         if self.with_state(|s| s.show_context_menu) {
             let state = self.state.clone();
             let running = self.running.clone();
+            let cached_top = self.cached_always_on_top;
             let (px, py) = self.with_state(|s| s.menu_position);
 
             ctx.show_viewport_immediate(
@@ -165,7 +269,8 @@ impl eframe::App for ReaderApp {
                     .with_position(egui::pos2(px, py))
                     .with_resizable(false)
                     .with_maximize_button(false)
-                    .with_minimize_button(false),
+                    .with_minimize_button(false)
+                    .with_always_on_top(),
                 move |vctx, _class| {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::popup(&vctx.style()))
@@ -198,13 +303,13 @@ impl eframe::App for ReaderApp {
                             ui.separator();
 
                             // 置顶
-                            let always_on_top = state.lock().unwrap().config.always_on_top;
-                            let top_label = if always_on_top { "取消置顶" } else { "置顶" };
+                            let top_label = if cached_top { "取消置顶" } else { "置顶" };
                             if ui.button(top_label).clicked() {
-                                let mut s = state.lock().unwrap();
-                                s.config.always_on_top = !s.config.always_on_top;
-                                let _ = s.config.save();
-                                s.show_context_menu = false;
+                                let mut cfg = crate::config::AppConfig::global().lock().unwrap();
+                                cfg.always_on_top = !cfg.always_on_top;
+                                let _ = cfg.save();
+                                drop(cfg);
+                                state.lock().unwrap().show_context_menu = false;
                                 vctx.send_viewport_cmd(ViewportCommand::Close);
                             }
 
@@ -224,10 +329,14 @@ impl eframe::App for ReaderApp {
 
                             // 样式设置
                             if ui.button("样式设置").clicked() {
+                                let cfg = crate::config::AppConfig::global().lock().unwrap();
+                                let bg = AppConfig::parse_color(&cfg.style.bg_color);
+                                let fg = AppConfig::parse_color(&cfg.style.font_color);
+                                let font = cfg.style.font.clone();
+                                let size = cfg.style.font_size;
+                                drop(cfg); // 释放 Config 锁
                                 let mut s = state.lock().unwrap();
                                 s.show_context_menu = false;
-                                let bg = AppConfig::parse_color(&s.config.style.bg_color);
-                                let fg = AppConfig::parse_color(&s.config.style.font_color);
                                 s.tmp_bg_color = [
                                     ((bg >> 16) & 0xFF) as f32 / 255.0,
                                     ((bg >> 8) & 0xFF) as f32 / 255.0,
@@ -238,8 +347,8 @@ impl eframe::App for ReaderApp {
                                     ((fg >> 8) & 0xFF) as f32 / 255.0,
                                     (fg & 0xFF) as f32 / 255.0,
                                 ];
-                                s.tmp_font_name = s.config.style.font.clone();
-                                s.tmp_font_size = s.config.style.font_size;
+                                s.tmp_font_name = font;
+                                s.tmp_font_size = size;
                                 s.show_style_dialog = true;
                                 vctx.send_viewport_cmd(ViewportCommand::Close);
                             }
@@ -255,7 +364,8 @@ impl eframe::App for ReaderApp {
 
                             // 退出
                             if ui.button("退出").clicked() {
-                                state.lock().unwrap().save_history();
+                                let s = state.lock().unwrap();
+                                s.save_current_history();
                                 running.store(false, Ordering::SeqCst);
                                 vctx.send_viewport_cmd(ViewportCommand::Close);
                             }
@@ -364,7 +474,7 @@ impl eframe::App for ReaderApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.with_state_mut(|s| s.save_history());
+        self.with_state(|s| s.save_current_history());
         self.running.store(false, Ordering::SeqCst);
     }
 }
@@ -382,15 +492,16 @@ impl ReaderApp {
                 } = event
                 {
                     let key_str = format!("{:?}", key);
-                    let mut s = self.state.lock().unwrap();
+                    let mut cfg = crate::config::AppConfig::global().lock().unwrap();
                     match idx {
-                        0 => s.config.shortcuts.prev_line = key_str.clone(),
-                        1 => s.config.shortcuts.next_line = key_str.clone(),
-                        2 => s.config.shortcuts.scroll_left = key_str.clone(),
-                        3 => s.config.shortcuts.scroll_right = key_str.clone(),
+                        0 => cfg.shortcuts.prev_line = key_str.clone(),
+                        1 => cfg.shortcuts.next_line = key_str.clone(),
+                        2 => cfg.shortcuts.scroll_left = key_str.clone(),
+                        3 => cfg.shortcuts.scroll_right = key_str.clone(),
                         _ => {}
                     }
-                    let _ = s.config.save();
+                    let _ = cfg.save();
+                    let mut s = self.state.lock().unwrap();
                     s.waiting_key = None;
                     return;
                 }
@@ -407,15 +518,16 @@ impl ReaderApp {
             } = event
             {
                 let key_name = format!("{:?}", key);
+                let shortcuts = &self.cached_shortcuts;
                 let mut s = self.state.lock().unwrap();
 
-                if key_name == s.config.shortcuts.prev_line {
+                if key_name == shortcuts.prev_line {
                     s.prev_line();
-                } else if key_name == s.config.shortcuts.next_line {
+                } else if key_name == shortcuts.next_line {
                     s.next_line();
-                } else if key_name == s.config.shortcuts.scroll_left {
+                } else if key_name == shortcuts.scroll_left {
                     s.scroll_left();
-                } else if key_name == s.config.shortcuts.scroll_right {
+                } else if key_name == shortcuts.scroll_right {
                     s.scroll_right();
                 }
             }
@@ -454,11 +566,22 @@ fn render_style_dialog(ctx: &egui::Context, state: &SharedState) -> bool {
         ui.horizontal(|ui| {
             ui.label("背景颜色:");
             ui.color_edit_button_rgb(&mut bg);
+            if ui.button("取色").clicked() {
+                // 标记正在取色，关闭当前对话框，开始屏幕取色
+                state.lock().unwrap().color_picking = Some(0);
+                state.lock().unwrap().show_style_dialog = false;
+                should_close = true;
+            }
         });
 
         ui.horizontal(|ui| {
             ui.label("字体颜色:");
             ui.color_edit_button_rgb(&mut fg);
+            if ui.button("取色").clicked() {
+                state.lock().unwrap().color_picking = Some(1);
+                state.lock().unwrap().show_style_dialog = false;
+                should_close = true;
+            }
         });
 
         ui.horizontal(|ui| {
@@ -499,15 +622,20 @@ fn render_style_dialog(ctx: &egui::Context, state: &SharedState) -> bool {
                 should_close = true;
             }
             if ui.button("取消").clicked() {
-                // 取消时恢复到配置中的原始值
+                // 取消时恢复到配置中的原始值（先读 Config，再锁 State）
                 {
+                    let cfg = crate::config::AppConfig::global().lock().unwrap();
+                    let cfg_bg = crate::config::AppConfig::parse_color(&cfg.style.bg_color);
+                    let cfg_fg = crate::config::AppConfig::parse_color(&cfg.style.font_color);
+                    let cfg_font = cfg.style.font.clone();
+                    let cfg_size = cfg.style.font_size;
+                    drop(cfg); // 释放 Config 锁
+
                     let mut s = state.lock().unwrap();
-                    let cfg_bg = crate::config::AppConfig::parse_color(&s.config.style.bg_color);
-                    let cfg_fg = crate::config::AppConfig::parse_color(&s.config.style.font_color);
                     s.tmp_bg_color = hex_to_rgb_cfg(cfg_bg);
                     s.tmp_font_color = hex_to_rgb_cfg(cfg_fg);
-                    s.tmp_font_name = s.config.style.font.clone();
-                    s.tmp_font_size = s.config.style.font_size;
+                    s.tmp_font_name = cfg_font;
+                    s.tmp_font_size = cfg_size;
                     s.show_style_dialog = false;
                 }
                 should_close = true;
@@ -547,12 +675,18 @@ fn render_shortcut_dialog(
 
     egui::CentralPanel::default().show(ctx, |ui| {
         let (prev, next, left, right, waiting) = {
+            let cfg = crate::config::AppConfig::global().lock().unwrap();
+            let prev = cfg.shortcuts.prev_line.clone();
+            let next = cfg.shortcuts.next_line.clone();
+            let left = cfg.shortcuts.scroll_left.clone();
+            let right = cfg.shortcuts.scroll_right.clone();
+            drop(cfg); // 释放 Config 锁
             let s = state.lock().unwrap();
             (
-                s.config.shortcuts.prev_line.clone(),
-                s.config.shortcuts.next_line.clone(),
-                s.config.shortcuts.scroll_left.clone(),
-                s.config.shortcuts.scroll_right.clone(),
+                prev,
+                next,
+                left,
+                right,
                 s.waiting_key.clone(),
             )
         };
@@ -593,16 +727,16 @@ fn render_shortcut_dialog(
                 } = event
                 {
                     let key_str = format!("{:?}", key);
-                    let mut s = state.lock().unwrap();
+                    let mut cfg = crate::config::AppConfig::global().lock().unwrap();
                     match idx {
-                        0 => s.config.shortcuts.prev_line = key_str.clone(),
-                        1 => s.config.shortcuts.next_line = key_str.clone(),
-                        2 => s.config.shortcuts.scroll_left = key_str.clone(),
-                        3 => s.config.shortcuts.scroll_right = key_str.clone(),
+                        0 => cfg.shortcuts.prev_line = key_str.clone(),
+                        1 => cfg.shortcuts.next_line = key_str.clone(),
+                        2 => cfg.shortcuts.scroll_left = key_str.clone(),
+                        3 => cfg.shortcuts.scroll_right = key_str.clone(),
                         _ => {}
                     }
-                    let _ = s.config.save();
-                    s.waiting_key = None;
+                    let _ = cfg.save();
+                    state.lock().unwrap().waiting_key = None;
                 }
             }
         }
@@ -701,7 +835,7 @@ fn render_history_dialog(ctx: &egui::Context, state: &SharedState) {
         return;
     }
 
-    let entries = state.lock().unwrap().history_db.get_entries();
+    let entries = crate::history::HistoryManager::global().lock().unwrap().get_entries();
     let mut should_close = false;
     let mut jump_to: Option<(String, usize)> = None;
 

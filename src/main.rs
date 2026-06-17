@@ -3,6 +3,7 @@
 mod app;
 mod cache;
 mod chapter;
+mod color_picker;
 mod config;
 mod history;
 mod parser;
@@ -16,10 +17,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 fn main() -> Result<(), eframe::Error> {
-    // 初始化应用状态
     let mut app_state = state::AppState::new();
-
-    // 枚举系统字体
     app_state.fonts = enumerate_fonts();
 
     let state: SharedState = Arc::new(Mutex::new(app_state));
@@ -27,16 +25,11 @@ fn main() -> Result<(), eframe::Error> {
     let running = Arc::new(AtomicBool::new(true));
     let window_visible = Arc::new(AtomicBool::new(true));
 
-    // 启动托盘线程
     tray::start_tray_thread(running.clone(), window_visible.clone());
-
-    // 将状态存储到全局变量
     STATE.set(state.clone()).ok();
 
-    // 读取配置
     let config = {
-        let s = state.lock().unwrap();
-        s.config.clone()
+        crate::config::AppConfig::global().lock().unwrap().clone()
     };
 
     // 构建 eframe 选项

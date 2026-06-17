@@ -26,8 +26,12 @@ const ID_TRAY_EXIT: i32 = 1002;
 /// 共享标志：主窗口是否可见。托盘线程显示窗口时设为 true，应用隐藏时设为 false
 static WINDOW_VISIBLE: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
 
+/// 共享标志：托盘线程是否继续运行
+static RUNNING: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+
 pub fn start_tray_thread(running: Arc<AtomicBool>, window_visible: Arc<AtomicBool>) {
     let _ = WINDOW_VISIBLE.set(window_visible);
+    let _ = RUNNING.set(running.clone());
     thread::spawn(move || {
         tray_thread(running);
     });
@@ -57,6 +61,20 @@ fn show_main_window() {
 }
 
 fn exit_main_app() {
+    // 直接通过全局 STATE 保存历史记录，绕过 egui 事件循环
+    // （窗口隐藏时 update() 不会被调用，必须在这里直接保存）
+    if let Some(state) = crate::state::STATE.get() {
+        if let Ok(s) = state.lock() {
+            s.save_current_history();
+        }
+    }
+
+    // 立即停止托盘线程的消息循环
+    if let Some(running) = RUNNING.get() {
+        running.store(false, Ordering::SeqCst);
+    }
+
+    // 发送关闭消息给主窗口（即使窗口隐藏，PostMessage 也会投递到消息队列）
     let hwnd = find_main_window();
     if !hwnd.0.is_null() {
         unsafe {
