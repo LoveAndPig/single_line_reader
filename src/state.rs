@@ -45,6 +45,13 @@ pub struct AppState {
     // 待应用的置顶状态变更
     pub pending_always_on_top: Option<bool>,
 
+    // 正则表达式对话框
+    pub show_regex_dialog: bool,
+    pub regex_input: String,
+    pub regex_test_title: String,
+    pub regex_test_result: Option<bool>,
+    pub regex_list: Vec<String>,
+
     // 系统字体列表
     pub fonts: Vec<String>,
 }
@@ -87,6 +94,11 @@ impl AppState {
             waiting_key: None,
             color_picking: None,
             pending_always_on_top: None,
+            show_regex_dialog: false,
+            regex_input: String::new(),
+            regex_test_title: String::new(),
+            regex_test_result: None,
+            regex_list: Vec::new(),
             fonts: Vec::new(),
         };
         result

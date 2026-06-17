@@ -390,6 +390,22 @@ impl eframe::App for ReaderApp {
                                 vctx.send_viewport_cmd(ViewportCommand::Close);
                             }
 
+                            // 正则表达式
+                            if ui.button("正则表达式").clicked() {
+                                // 同步 regex_list
+                                let patterns = crate::regex_config::RegexConfig::global()
+                                    .lock()
+                                    .unwrap()
+                                    .patterns
+                                    .clone();
+                                let mut s = state.lock().unwrap();
+                                s.show_context_menu = false;
+                                s.regex_list = patterns;
+                                s.regex_test_result = None;
+                                s.show_regex_dialog = true;
+                                vctx.send_viewport_cmd(ViewportCommand::Close);
+                            }
+
                             ui.separator();
 
                             // 退出
@@ -440,6 +456,22 @@ impl eframe::App for ReaderApp {
                     .with_minimize_button(false),
                 move |vctx, _class| {
                     render_shortcut_dialog(vctx, &state);
+                },
+            );
+        }
+
+        // 正则表达式对话框（独立 viewport）
+        if self.with_state(|s| s.show_regex_dialog) {
+            let state = self.state.clone();
+
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("regex_dialog"),
+                egui::ViewportBuilder::default()
+                    .with_title("正则表达式管理")
+                    .with_inner_size([500.0, 400.0])
+                    .with_resizable(true),
+                move |vctx, _class| {
+                    render_regex_dialog(vctx, &state);
                 },
             );
         }
@@ -994,4 +1026,141 @@ fn render_history_dialog(ctx: &egui::Context, state: &SharedState) {
         });
         state.lock().unwrap().show_history_dialog = false;
     }
+}
+
+fn render_regex_dialog(ctx: &egui::Context, state: &SharedState) {
+    // 检测原生关闭按钮
+    if ctx.input(|i| i.viewport().close_requested()) {
+        state.lock().unwrap().show_regex_dialog = false;
+        return;
+    }
+
+    egui::CentralPanel::default().show(ctx, |ui| {
+        // 从 state 读取当前值
+        let (mut input, mut test_title, test_result, patterns) = {
+            let s = state.lock().unwrap();
+            (
+                s.regex_input.clone(),
+                s.regex_test_title.clone(),
+                s.regex_test_result,
+                s.regex_list.clone(),
+            )
+        };
+
+        ui.heading("正则表达式管理");
+        ui.label("添加自定义正则表达式用于匹配章节标题");
+        ui.separator();
+
+        // 正则表达式输入
+        ui.horizontal(|ui| {
+            ui.label("表达式:");
+            ui.text_edit_singleline(&mut input);
+        });
+
+        // 测试标题输入
+        ui.horizontal(|ui| {
+            ui.label("测试标题:");
+            ui.text_edit_singleline(&mut test_title);
+        });
+
+        // 验证按钮
+        ui.horizontal(|ui| {
+            if ui.button("验证").clicked() {
+                if input.is_empty() {
+                    state.lock().unwrap().regex_test_result = Some(false);
+                } else {
+                    let result = regex::Regex::new(&input)
+                        .map(|re| re.is_match(&test_title))
+                        .unwrap_or(false);
+                    state.lock().unwrap().regex_test_result = Some(result);
+                }
+            }
+
+            // 显示验证结果
+            if let Some(result) = test_result {
+                if result {
+                    ui.colored_label(egui::Color32::GREEN, "✓ 匹配成功");
+                } else {
+                    ui.colored_label(egui::Color32::RED, "✗ 不匹配");
+                }
+            }
+        });
+
+        // 添加按钮
+        ui.horizontal(|ui| {
+            if ui.button("添加").clicked() {
+                let trimmed = input.trim().to_string();
+                if !trimmed.is_empty() {
+                    // 检查正则是否有效
+                    if regex::Regex::new(&trimmed).is_ok() {
+                        let _ = crate::regex_config::RegexConfig::global()
+                            .lock()
+                            .unwrap()
+                            .add_pattern(&trimmed);
+                        // 同步 state
+                        let mut s = state.lock().unwrap();
+                        s.regex_list = crate::regex_config::RegexConfig::global()
+                            .lock()
+                            .unwrap()
+                            .patterns
+                            .clone();
+                        s.regex_input.clear();
+                        s.regex_test_title.clear();
+                        s.regex_test_result = None;
+                    }
+                }
+            }
+
+            // 清空输入
+            if ui.button("清空").clicked() {
+                input.clear();
+                test_title.clear();
+                state.lock().unwrap().regex_test_result = None;
+            }
+        });
+
+        ui.separator();
+
+        // 已添加的正则列表
+        ui.label(format!("已添加 {} 条正则表达式:", patterns.len()));
+
+        egui::ScrollArea::vertical()
+            .max_height(200.0)
+            .show(ui, |ui| {
+                let mut delete_idx: Option<usize> = None;
+                for (idx, pattern) in patterns.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}. {}", idx + 1, pattern));
+                        if ui.button("删除").clicked() {
+                            delete_idx = Some(idx);
+                        }
+                    });
+                }
+
+                if let Some(idx) = delete_idx {
+                    let _ = crate::regex_config::RegexConfig::global()
+                        .lock()
+                        .unwrap()
+                        .remove_pattern(idx);
+                    let mut s = state.lock().unwrap();
+                    s.regex_list = crate::regex_config::RegexConfig::global()
+                        .lock()
+                        .unwrap()
+                        .patterns
+                        .clone();
+                }
+            });
+
+        ui.add_space(8.0);
+        if ui.button("关闭").clicked() {
+            state.lock().unwrap().show_regex_dialog = false;
+        }
+
+        // 每帧写回临时值
+        {
+            let mut s = state.lock().unwrap();
+            s.regex_input = input;
+            s.regex_test_title = test_title;
+        }
+    });
 }

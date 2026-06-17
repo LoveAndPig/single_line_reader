@@ -4,13 +4,33 @@ pub struct Chapter {
     pub title: String,
 }
 
-/// 使用内置正则表达式检测章节（手动实现，不依赖 regex crate）
-/// 正则：^第?\s*(?:\d+|[零一二三四五六七八九十百千万]+)\s*(?:章\s*节?|节|话|話|\s+)
+/// 使用内置正则表达式 + 用户自定义正则检测章节
 pub fn detect_chapters(lines: &[String]) -> Vec<Chapter> {
     let mut chapters = Vec::new();
 
+    // 加载用户自定义正则
+    let custom_patterns: Vec<regex::Regex> = crate::regex_config::RegexConfig::global()
+        .lock()
+        .unwrap()
+        .patterns
+        .iter()
+        .filter_map(|p| regex::Regex::new(p).ok())
+        .collect();
+
     for (i, line) in lines.iter().enumerate() {
-        if is_chapter_line(line) {
+        let mut matched = is_chapter_line(line); // 内置规则
+
+        // 检查用户自定义正则
+        if !matched {
+            for re in &custom_patterns {
+                if re.is_match(line) {
+                    matched = true;
+                    break;
+                }
+            }
+        }
+
+        if matched {
             chapters.push(Chapter {
                 line_number: i,
                 title: line.clone(),

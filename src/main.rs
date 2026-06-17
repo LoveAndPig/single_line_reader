@@ -7,6 +7,7 @@ mod color_picker;
 mod config;
 mod history;
 mod parser;
+mod regex_config;
 mod state;
 mod tray;
 
