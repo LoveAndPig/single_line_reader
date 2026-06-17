@@ -83,17 +83,31 @@ impl eframe::App for ReaderApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.refresh_config_cache();
 
-        // 主窗口高度根据字号自适应调整
+        // 处理待应用的置顶状态变更
+        let pending_top = self.with_state_mut(|s| s.pending_always_on_top.take());
+        if let Some(top) = pending_top {
+            let level = if top {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            };
+            ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
+        }
+
+        // 主窗口高度根据字号自适应调整（仅在高度变化时发送，避免不必要的窗口消息）
         {
             let desired_height = self.cached_font_size as f32 * 1.5;
-            let current_width = ctx.input(|i| {
-                i.viewport().inner_rect
-                    .map(|r| r.width())
-                    .unwrap_or(800.0)
+            let (cw, ch) = ctx.input(|i| {
+                i.viewport()
+                    .inner_rect
+                    .map(|r| (r.width(), r.height()))
+                    .unwrap_or((800.0, desired_height))
             });
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-                egui::Vec2::new(current_width, desired_height),
-            ));
+            if (desired_height - ch).abs() > 1.0 {
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(
+                    egui::Vec2::new(cw, desired_height),
+                ));
+            }
         }
 
         // 检查运行标志
@@ -273,7 +287,7 @@ impl eframe::App for ReaderApp {
             let cached_top = self.cached_always_on_top;
             let (px, py) = self.with_state(|s| s.menu_position);
 
-            ctx.show_viewport_deferred(
+            ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("context_menu"),
                 egui::ViewportBuilder::default()
                     .with_decorations(false)
@@ -318,10 +332,13 @@ impl eframe::App for ReaderApp {
                             // 置顶
                             let top_label = if cached_top { "取消置顶" } else { "置顶" };
                             if ui.button(top_label).clicked() {
+                                let new_top = !cached_top;
                                 let mut cfg = crate::config::AppConfig::global().lock().unwrap();
-                                cfg.always_on_top = !cfg.always_on_top;
+                                cfg.always_on_top = new_top;
                                 let _ = cfg.save();
                                 drop(cfg);
+                                // 设置待应用的置顶状态，由主 update 循环实际应用
+                                state.lock().unwrap().pending_always_on_top = Some(new_top);
                                 state.lock().unwrap().show_context_menu = false;
                                 vctx.send_viewport_cmd(ViewportCommand::Close);
                             }

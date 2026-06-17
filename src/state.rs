@@ -42,6 +42,9 @@ pub struct AppState {
     // 取色器状态：Some(target) 表示正在取色，target: 0=bg, 1=fg
     pub color_picking: Option<usize>,
 
+    // 待应用的置顶状态变更
+    pub pending_always_on_top: Option<bool>,
+
     // 系统字体列表
     pub fonts: Vec<String>,
 }
@@ -83,6 +86,7 @@ impl AppState {
             tmp_font_size: font_size,
             waiting_key: None,
             color_picking: None,
+            pending_always_on_top: None,
             fonts: Vec::new(),
         };
         result
