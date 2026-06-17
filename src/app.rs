@@ -83,6 +83,19 @@ impl eframe::App for ReaderApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.refresh_config_cache();
 
+        // 主窗口高度根据字号自适应调整
+        {
+            let desired_height = self.cached_font_size as f32 * 1.5;
+            let current_width = ctx.input(|i| {
+                i.viewport().inner_rect
+                    .map(|r| r.width())
+                    .unwrap_or(800.0)
+            });
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(
+                egui::Vec2::new(current_width, desired_height),
+            ));
+        }
+
         // 检查运行标志
         if !self.running.load(Ordering::SeqCst) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -260,12 +273,12 @@ impl eframe::App for ReaderApp {
             let cached_top = self.cached_always_on_top;
             let (px, py) = self.with_state(|s| s.menu_position);
 
-            ctx.show_viewport_immediate(
+            ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("context_menu"),
                 egui::ViewportBuilder::default()
                     .with_decorations(false)
                     .with_title("")
-                    .with_inner_size([180.0, 340.0])
+                    .with_inner_size([180.0, 240.0])
                     .with_position(egui::pos2(px, py))
                     .with_resizable(false)
                     .with_maximize_button(false)
@@ -404,7 +417,7 @@ impl eframe::App for ReaderApp {
                 egui::ViewportId::from_hash_of("shortcut_dialog"),
                 egui::ViewportBuilder::default()
                     .with_title("快捷键设置")
-                    .with_inner_size([380.0, 200.0])
+                    .with_inner_size([240.0, 160.0])
                     .with_resizable(false)
                     .with_maximize_button(false)
                     .with_minimize_button(false),
@@ -430,21 +443,38 @@ impl eframe::App for ReaderApp {
             );
         }
 
-        // 图片显示对话框（独立 viewport）
+        // 图片显示对话框（独立 viewport，根据图片尺寸自适应）
         if self.with_state(|s| s.show_image_dialog) {
-            let has_image = {
+            let (has_image, image_data) = {
                 let s = self.state.lock().unwrap();
-                s.show_image_dialog
-                    && s.get_current_image().is_some()
+                let img = s.get_current_image();
+                (
+                    s.show_image_dialog && img.is_some(),
+                    img.map(|i| i.data.clone()),
+                )
             };
             if has_image {
                 let state = self.state.clone();
+
+                // 预读图片尺寸以自适应窗口大小
+                let (img_w, img_h) = image_data
+                    .as_ref()
+                    .and_then(|data| image::load_from_memory(data).ok())
+                    .map(|img| (img.width() as f32, img.height() as f32))
+                    .unwrap_or((500.0, 400.0));
+
+                // 限制最大尺寸，避免窗口超出屏幕
+                let max_w = 1200.0f32;
+                let max_h = 900.0f32;
+                let scale = (max_w / img_w).min(max_h / img_h).min(1.0);
+                let win_w = (img_w * scale).max(200.0);
+                let win_h = (img_h * scale).max(150.0);
 
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("image_dialog"),
                     egui::ViewportBuilder::default()
                         .with_title("图片")
-                        .with_inner_size([500.0, 400.0])
+                        .with_inner_size([win_w, win_h])
                         .with_resizable(true),
                     move |vctx, _class| {
                         render_image_dialog(vctx, &state);
@@ -937,6 +967,12 @@ fn render_history_dialog(ctx: &egui::Context, state: &SharedState) {
             let p = std::path::PathBuf::from(&path);
             if s.load_file(&p) {
                 s.goto_line(line);
+            } else {
+                // 文件不存在或解析失败，删除这条历史记录
+                crate::history::HistoryManager::global()
+                    .lock()
+                    .unwrap()
+                    .delete_entry(&path);
             }
         });
         state.lock().unwrap().show_history_dialog = false;

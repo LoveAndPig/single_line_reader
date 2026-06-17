@@ -28,13 +28,40 @@ fn main() -> Result<(), eframe::Error> {
     tray::start_tray_thread(running.clone(), window_visible.clone());
     STATE.set(state.clone()).ok();
 
+    // 启动时自动加载最近的历史记录
+    {
+        let entries = crate::history::HistoryManager::global().lock().unwrap().get_entries();
+        if let Some(latest) = entries.first() {
+            let path = std::path::PathBuf::from(&latest.file_path);
+            if path.exists() {
+                let mut s = state.lock().unwrap();
+                if s.load_file(&path) {
+                    s.goto_line(latest.current_line);
+                } else {
+                    // 文件存在但解析失败，清理无效记录
+                    crate::history::HistoryManager::global()
+                        .lock()
+                        .unwrap()
+                        .delete_entry(&latest.file_path);
+                }
+            } else {
+                // 文件已不存在，清理无效记录
+                crate::history::HistoryManager::global()
+                    .lock()
+                    .unwrap()
+                    .delete_entry(&latest.file_path);
+            }
+        }
+    }
+
     let config = {
         crate::config::AppConfig::global().lock().unwrap().clone()
     };
 
-    // 构建 eframe 选项
+    // 构建 eframe 选项 —— 主窗口高度根据字号自适应
+    let initial_height = config.style.font_size as f32 * 2.5;
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([config.window_width as f32, config.window_height as f32])
+        .with_inner_size([config.window_width as f32, initial_height])
         .with_position([config.window_x as f32, config.window_y as f32])
         .with_decorations(false)
         .with_resizable(true)

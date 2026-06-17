@@ -80,6 +80,14 @@ impl HistoryManager {
         entries.filter_map(|e| e.ok()).collect()
     }
 
+    /// 删除指定路径的历史记录
+    pub fn delete_entry(&mut self, file_path: &str) {
+        let _ = self.conn.execute(
+            "DELETE FROM history WHERE file_path = ?1",
+            params![file_path],
+        );
+    }
+
     /// 根据文件路径查询历史记录
     #[allow(dead_code)]
     pub fn get_entry(&self, file_path: &str) -> Option<HistoryEntry> {
