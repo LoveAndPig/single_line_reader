@@ -4,7 +4,17 @@ use egui::{Color32, Context, ViewportCommand};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use windows::Win32::Foundation::POINT;
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+
+/// 计算屏幕中心位置（用于定位对话框窗口）
+fn screen_center(win_w: f32, win_h: f32) -> egui::Pos2 {
+    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
+    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
+    egui::pos2(
+        ((screen_w - win_w) / 2.0).max(0.0),
+        ((screen_h - win_h) / 2.0).max(0.0),
+    )
+}
 
 pub struct ReaderApp {
     state: SharedState,
@@ -441,25 +451,22 @@ impl eframe::App for ReaderApp {
         if self.with_state(|s| s.show_style_dialog) {
             let state = self.state.clone();
             let ctx_clone = ctx.clone();
-            let centered = Arc::new(AtomicBool::new(false));
+            let center = screen_center(380.0, 250.0);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("style_dialog"),
                 egui::ViewportBuilder::default()
                     .with_title("样式设置")
                     .with_inner_size([380.0, 250.0])
+                    .with_position(center)
                     .with_resizable(false)
                     .with_maximize_button(false)
                     .with_minimize_button(false)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    if !centered.swap(true, Ordering::Relaxed) {
-                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
-                            vctx.send_viewport_cmd(cmd);
-                        }
-                    }
                     let should_close = render_style_dialog(vctx, &state);
                     if should_close {
+                        vctx.send_viewport_cmd(ViewportCommand::Close);
                         ctx_clone.request_repaint();
                     }
                 },
@@ -469,23 +476,19 @@ impl eframe::App for ReaderApp {
         // 快捷键设置对话框（独立 viewport）
         if self.with_state(|s| s.show_shortcut_dialog) {
             let state = self.state.clone();
-            let centered = Arc::new(AtomicBool::new(false));
+            let center = screen_center(240.0, 160.0);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("shortcut_dialog"),
                 egui::ViewportBuilder::default()
                     .with_title("快捷键设置")
                     .with_inner_size([240.0, 160.0])
+                    .with_position(center)
                     .with_resizable(false)
                     .with_maximize_button(false)
                     .with_minimize_button(false)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    if !centered.swap(true, Ordering::Relaxed) {
-                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
-                            vctx.send_viewport_cmd(cmd);
-                        }
-                    }
                     render_shortcut_dialog(vctx, &state);
                 },
             );
@@ -494,21 +497,17 @@ impl eframe::App for ReaderApp {
         // 正则表达式对话框（独立 viewport）
         if self.with_state(|s| s.show_regex_dialog) {
             let state = self.state.clone();
-            let centered = Arc::new(AtomicBool::new(false));
+            let center = screen_center(500.0, 400.0);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("regex_dialog"),
                 egui::ViewportBuilder::default()
                     .with_title("正则表达式管理")
                     .with_inner_size([500.0, 400.0])
+                    .with_position(center)
                     .with_resizable(true)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    if !centered.swap(true, Ordering::Relaxed) {
-                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
-                            vctx.send_viewport_cmd(cmd);
-                        }
-                    }
                     render_regex_dialog(vctx, &state);
                 },
             );
@@ -517,21 +516,17 @@ impl eframe::App for ReaderApp {
         // 章节列表对话框（独立 viewport）
         if self.with_state(|s| s.show_chapter_dialog) {
             let state = self.state.clone();
-            let centered = Arc::new(AtomicBool::new(false));
+            let center = screen_center(300.0, 400.0);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("chapter_dialog"),
                 egui::ViewportBuilder::default()
                     .with_title("章节列表")
                     .with_inner_size([300.0, 400.0])
+                    .with_position(center)
                     .with_resizable(true)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    if !centered.swap(true, Ordering::Relaxed) {
-                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
-                            vctx.send_viewport_cmd(cmd);
-                        }
-                    }
                     render_chapter_dialog(vctx, &state);
                 },
             );
@@ -564,21 +559,17 @@ impl eframe::App for ReaderApp {
                 let win_w = (img_w * scale).max(200.0);
                 let win_h = (img_h * scale).max(150.0);
 
-                let centered = Arc::new(AtomicBool::new(false));
+                let center = screen_center(win_w, win_h);
 
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("image_dialog"),
                     egui::ViewportBuilder::default()
                         .with_title("图片")
                         .with_inner_size([win_w, win_h])
+                        .with_position(center)
                         .with_resizable(true)
                         .with_always_on_top(),
                     move |vctx, _class| {
-                        if !centered.swap(true, Ordering::Relaxed) {
-                            if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
-                                vctx.send_viewport_cmd(cmd);
-                            }
-                        }
                         render_image_dialog(vctx, &state);
                     },
                 );
@@ -591,21 +582,17 @@ impl eframe::App for ReaderApp {
         // 历史记录对话框（独立 viewport）
         if self.with_state(|s| s.show_history_dialog) {
             let state = self.state.clone();
-            let centered = Arc::new(AtomicBool::new(false));
+            let center = screen_center(500.0, 400.0);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("history_dialog"),
                 egui::ViewportBuilder::default()
                     .with_title("阅读历史")
                     .with_inner_size([500.0, 400.0])
+                    .with_position(center)
                     .with_resizable(true)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    if !centered.swap(true, Ordering::Relaxed) {
-                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(vctx) {
-                            vctx.send_viewport_cmd(cmd);
-                        }
-                    }
                     render_history_dialog(vctx, &state);
                 },
             );
@@ -852,6 +839,7 @@ fn render_shortcut_dialog(
         ui.add_space(8.0);
         if ui.button("关闭").clicked() {
             state.lock().unwrap().show_shortcut_dialog = false;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
         }
 
         // 在对话框中处理键盘输入
@@ -903,6 +891,7 @@ fn render_chapter_dialog(ctx: &egui::Context, state: &SharedState) {
                     let mut s = state.lock().unwrap();
                     s.goto_line(line);
                     s.show_chapter_dialog = false;
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
             }
         });
@@ -910,6 +899,7 @@ fn render_chapter_dialog(ctx: &egui::Context, state: &SharedState) {
         ui.add_space(8.0);
         if ui.button("关闭").clicked() {
             state.lock().unwrap().show_chapter_dialog = false;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
         }
     });
 }
@@ -1068,6 +1058,7 @@ fn render_history_dialog(ctx: &egui::Context, state: &SharedState) {
     // 处理动作（在 CentralPanel 之后执行，避免借用冲突）
     if should_close {
         state.lock().unwrap().show_history_dialog = false;
+        ctx.send_viewport_cmd(ViewportCommand::Close);
     }
     if let Some((path, line)) = jump_to {
         let state_clone = state.clone();
@@ -1085,6 +1076,7 @@ fn render_history_dialog(ctx: &egui::Context, state: &SharedState) {
             }
         });
         state.lock().unwrap().show_history_dialog = false;
+        ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 }
 
@@ -1214,6 +1206,7 @@ fn render_regex_dialog(ctx: &egui::Context, state: &SharedState) {
         ui.add_space(8.0);
         if ui.button("关闭").clicked() {
             state.lock().unwrap().show_regex_dialog = false;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
         }
 
         // 每帧写回临时值
