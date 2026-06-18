@@ -467,10 +467,10 @@ impl eframe::App for ReaderApp {
             );
         }
 
-        // 样式设置对话框（独立 viewport）
-        if self.with_state(|s| s.show_style_dialog) {
+        // 样式设置对话框（始终存在，通过显隐切换避免创建时的闪烁）
+        {
             let state = self.state.clone();
-            let ctx_clone = ctx.clone();
+            let dialog_visible = self.with_state(|s| s.show_style_dialog);
             let center = screen_center(ctx, 380.0, 250.0);
 
             ctx.show_viewport_immediate(
@@ -484,18 +484,21 @@ impl eframe::App for ReaderApp {
                     .with_minimize_button(false)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    let should_close = render_style_dialog(vctx, &state);
-                    if should_close {
-                        vctx.send_viewport_cmd(ViewportCommand::Close);
-                        ctx_clone.request_repaint();
+                    if dialog_visible {
+                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                        render_style_dialog(vctx, &state);
+                    } else {
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                     }
                 },
             );
         }
 
-        // 快捷键设置对话框（独立 viewport）
-        if self.with_state(|s| s.show_shortcut_dialog) {
+        // 快捷键设置对话框（始终存在，通过显隐切换避免创建时的闪烁）
+        {
             let state = self.state.clone();
+            let dialog_visible = self.with_state(|s| s.show_shortcut_dialog);
             let center = screen_center(ctx, 240.0, 160.0);
 
             ctx.show_viewport_immediate(
@@ -509,14 +512,21 @@ impl eframe::App for ReaderApp {
                     .with_minimize_button(false)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    render_shortcut_dialog(vctx, &state);
+                    if dialog_visible {
+                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                        render_shortcut_dialog(vctx, &state);
+                    } else {
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                    }
                 },
             );
         }
 
-        // 正则表达式对话框（独立 viewport）
-        if self.with_state(|s| s.show_regex_dialog) {
+        // 正则表达式对话框（始终存在，通过显隐切换避免创建时的闪烁）
+        {
             let state = self.state.clone();
+            let dialog_visible = self.with_state(|s| s.show_regex_dialog);
             let center = screen_center(ctx, 500.0, 400.0);
 
             ctx.show_viewport_immediate(
@@ -528,14 +538,21 @@ impl eframe::App for ReaderApp {
                     .with_resizable(true)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    render_regex_dialog(vctx, &state);
+                    if dialog_visible {
+                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                        render_regex_dialog(vctx, &state);
+                    } else {
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                    }
                 },
             );
         }
 
-        // 章节列表对话框（独立 viewport）
-        if self.with_state(|s| s.show_chapter_dialog) {
+        // 章节列表对话框（始终存在，通过显隐切换避免创建时的闪烁）
+        {
             let state = self.state.clone();
+            let dialog_visible = self.with_state(|s| s.show_chapter_dialog);
             let center = screen_center(ctx, 300.0, 400.0);
 
             ctx.show_viewport_immediate(
@@ -547,61 +564,66 @@ impl eframe::App for ReaderApp {
                     .with_resizable(true)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    render_chapter_dialog(vctx, &state);
+                    if dialog_visible {
+                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                        render_chapter_dialog(vctx, &state);
+                    } else {
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                    }
                 },
             );
         }
 
-        // 图片显示对话框（独立 viewport，根据图片尺寸自适应）
-        if self.with_state(|s| s.show_image_dialog) {
-            let (has_image, image_data) = {
-                let s = self.state.lock().unwrap();
-                let img = s.get_current_image();
-                (
-                    s.show_image_dialog && img.is_some(),
-                    img.map(|i| i.data.clone()),
-                )
-            };
-            if has_image {
-                let state = self.state.clone();
+        // 图片显示对话框（始终存在，通过显隐切换避免创建时的闪烁；尺寸动态调整）
+        {
+            let state = self.state.clone();
+            let dialog_visible = self.with_state(|s| s.show_image_dialog);
+            let default_center = screen_center(ctx, 500.0, 400.0);
 
-                // 预读图片尺寸以自适应窗口大小
-                let (img_w, img_h) = image_data
-                    .as_ref()
-                    .and_then(|data| image::load_from_memory(data).ok())
-                    .map(|img| (img.width() as f32, img.height() as f32))
-                    .unwrap_or((500.0, 400.0));
-
-                // 限制最大尺寸，避免窗口超出屏幕
-                let max_w = 1200.0f32;
-                let max_h = 900.0f32;
-                let scale = (max_w / img_w).min(max_h / img_h).min(1.0);
-                let win_w = (img_w * scale).max(200.0);
-                let win_h = (img_h * scale).max(150.0);
-
-                let center = screen_center(ctx, win_w, win_h);
-
-                ctx.show_viewport_immediate(
-                    egui::ViewportId::from_hash_of("image_dialog"),
-                    egui::ViewportBuilder::default()
-                        .with_title("图片")
-                        .with_inner_size([win_w, win_h])
-                        .with_position(center)
-                        .with_resizable(true)
-                        .with_always_on_top(),
-                    move |vctx, _class| {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("image_dialog"),
+                egui::ViewportBuilder::default()
+                    .with_title("图片")
+                    .with_inner_size([500.0, 400.0])
+                    .with_position(default_center)
+                    .with_resizable(true)
+                    .with_always_on_top(),
+                move |vctx, _class| {
+                    if dialog_visible {
+                        // 动态计算图片尺寸
+                        let image_data = state
+                            .lock()
+                            .unwrap()
+                            .get_current_image()
+                            .map(|i| i.data.clone());
+                        let (img_w, img_h) = image_data
+                            .as_ref()
+                            .and_then(|data| image::load_from_memory(data).ok())
+                            .map(|img| (img.width() as f32, img.height() as f32))
+                            .unwrap_or((500.0, 400.0));
+                        let max_w = 1200.0f32;
+                        let max_h = 900.0f32;
+                        let scale = (max_w / img_w).min(max_h / img_h).min(1.0);
+                        let win_w = (img_w * scale).max(200.0);
+                        let win_h = (img_h * scale).max(150.0);
+                        // 重新计算居中位置
+                        let center = screen_center(vctx, win_w, win_h);
+                        vctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
+                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
                         render_image_dialog(vctx, &state);
-                    },
-                );
-            } else {
-                // 没有可用图片，关闭对话框标记
-                self.with_state_mut(|s| s.show_image_dialog = false);
-            }
+                    } else {
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                    }
+                },
+            );
         }
 
-        // 历史记录对话框（独立 viewport）
-        if self.with_state(|s| s.show_history_dialog) {
+        // 历史记录对话框（始终存在，通过显隐切换避免创建时的闪烁）
+        {
             let state = self.state.clone();
+            let dialog_visible = self.with_state(|s| s.show_history_dialog);
             let center = screen_center(ctx, 500.0, 400.0);
 
             ctx.show_viewport_immediate(
@@ -613,7 +635,13 @@ impl eframe::App for ReaderApp {
                     .with_resizable(true)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    render_history_dialog(vctx, &state);
+                    if dialog_visible {
+                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                        render_history_dialog(vctx, &state);
+                    } else {
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                    }
                 },
             );
         }
@@ -687,14 +715,13 @@ fn ctx_read_only(ctx: &egui::Context) -> std::sync::Arc<egui::InputState> {
 
 // ---- 独立 viewport 渲染函数 ----
 
-fn render_style_dialog(ctx: &egui::Context, state: &SharedState) -> bool {
+fn render_style_dialog(ctx: &egui::Context, state: &SharedState) {
     // 检测原生关闭按钮
     if ctx.input(|i| i.viewport().close_requested()) {
         state.lock().unwrap().show_style_dialog = false;
-        return true;
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        return;
     }
-
-    let mut should_close = false;
 
     egui::CentralPanel::default().show(ctx, |ui| {
         // 每帧从状态中读取临时值，保证 widget 状态在帧间不丢失
@@ -716,7 +743,7 @@ fn render_style_dialog(ctx: &egui::Context, state: &SharedState) -> bool {
                 // 标记正在取色，关闭当前对话框，开始屏幕取色
                 state.lock().unwrap().color_picking = Some(0);
                 state.lock().unwrap().show_style_dialog = false;
-                should_close = true;
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             }
         });
 
@@ -726,7 +753,7 @@ fn render_style_dialog(ctx: &egui::Context, state: &SharedState) -> bool {
             if ui.button("取色").clicked() {
                 state.lock().unwrap().color_picking = Some(1);
                 state.lock().unwrap().show_style_dialog = false;
-                should_close = true;
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             }
         });
 
@@ -765,7 +792,7 @@ fn render_style_dialog(ctx: &egui::Context, state: &SharedState) -> bool {
                 s.tmp_font_size = font_size;
                 s.apply_style();
                 s.show_style_dialog = false;
-                should_close = true;
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             }
             if ui.button("取消").clicked() {
                 // 取消时恢复到配置中的原始值（先读 Config，再锁 State）
@@ -784,7 +811,7 @@ fn render_style_dialog(ctx: &egui::Context, state: &SharedState) -> bool {
                     s.tmp_font_size = cfg_size;
                     s.show_style_dialog = false;
                 }
-                should_close = true;
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             }
         });
 
@@ -797,8 +824,6 @@ fn render_style_dialog(ctx: &egui::Context, state: &SharedState) -> bool {
             s.tmp_font_size = font_size;
         }
     });
-
-    should_close
 }
 
 fn hex_to_rgb_cfg(hex: u32) -> [f32; 3] {
@@ -816,6 +841,7 @@ fn render_shortcut_dialog(
     // 检测原生关闭按钮
     if ctx.input(|i| i.viewport().close_requested()) {
         state.lock().unwrap().show_shortcut_dialog = false;
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         return;
     }
 
@@ -859,7 +885,7 @@ fn render_shortcut_dialog(
         ui.add_space(8.0);
         if ui.button("关闭").clicked() {
             state.lock().unwrap().show_shortcut_dialog = false;
-            ctx.send_viewport_cmd(ViewportCommand::Close);
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
 
         // 在对话框中处理键盘输入
@@ -894,6 +920,7 @@ fn render_chapter_dialog(ctx: &egui::Context, state: &SharedState) {
     // 检测原生关闭按钮
     if ctx.input(|i| i.viewport().close_requested()) {
         state.lock().unwrap().show_chapter_dialog = false;
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         return;
     }
 
@@ -911,7 +938,7 @@ fn render_chapter_dialog(ctx: &egui::Context, state: &SharedState) {
                     let mut s = state.lock().unwrap();
                     s.goto_line(line);
                     s.show_chapter_dialog = false;
-                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                    ctx.send_viewport_cmd(ViewportCommand::Visible(false));
                 }
             }
         });
@@ -919,7 +946,7 @@ fn render_chapter_dialog(ctx: &egui::Context, state: &SharedState) {
         ui.add_space(8.0);
         if ui.button("关闭").clicked() {
             state.lock().unwrap().show_chapter_dialog = false;
-            ctx.send_viewport_cmd(ViewportCommand::Close);
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
     });
 }
@@ -928,6 +955,7 @@ fn render_image_dialog(ctx: &egui::Context, state: &SharedState) {
     // 检测原生关闭按钮
     if ctx.input(|i| i.viewport().close_requested()) {
         state.lock().unwrap().show_image_dialog = false;
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         return;
     }
 
@@ -938,6 +966,7 @@ fn render_image_dialog(ctx: &egui::Context, state: &SharedState) {
 
     if !has_image_data {
         state.lock().unwrap().show_image_dialog = false;
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         return;
     }
 
@@ -981,6 +1010,7 @@ fn render_history_dialog(ctx: &egui::Context, state: &SharedState) {
     // 检测原生关闭按钮
     if ctx.input(|i| i.viewport().close_requested()) {
         state.lock().unwrap().show_history_dialog = false;
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         return;
     }
 
@@ -1078,7 +1108,7 @@ fn render_history_dialog(ctx: &egui::Context, state: &SharedState) {
     // 处理动作（在 CentralPanel 之后执行，避免借用冲突）
     if should_close {
         state.lock().unwrap().show_history_dialog = false;
-        ctx.send_viewport_cmd(ViewportCommand::Close);
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
     }
     if let Some((path, line)) = jump_to {
         let state_clone = state.clone();
@@ -1096,7 +1126,7 @@ fn render_history_dialog(ctx: &egui::Context, state: &SharedState) {
             }
         });
         state.lock().unwrap().show_history_dialog = false;
-        ctx.send_viewport_cmd(ViewportCommand::Close);
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
     }
 }
 
@@ -1104,6 +1134,7 @@ fn render_regex_dialog(ctx: &egui::Context, state: &SharedState) {
     // 检测原生关闭按钮
     if ctx.input(|i| i.viewport().close_requested()) {
         state.lock().unwrap().show_regex_dialog = false;
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         return;
     }
 
@@ -1226,7 +1257,7 @@ fn render_regex_dialog(ctx: &egui::Context, state: &SharedState) {
         ui.add_space(8.0);
         if ui.button("关闭").clicked() {
             state.lock().unwrap().show_regex_dialog = false;
-            ctx.send_viewport_cmd(ViewportCommand::Close);
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
 
         // 每帧写回临时值
