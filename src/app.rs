@@ -26,6 +26,7 @@ pub struct ReaderApp {
     running: Arc<AtomicBool>,
     window_visible: Arc<AtomicBool>,
     // 缓存配置值，避免每帧加锁读取
+    cached_config_version: u64,
     cached_font_size: u32,
     cached_bg: Color32,
     cached_fg: Color32,
@@ -46,6 +47,7 @@ impl ReaderApp {
             state,
             running,
             window_visible,
+            cached_config_version: crate::config::AppConfig::version(),
             cached_font_size: cfg.style.font_size,
             cached_bg: Color32::from_rgb(
                 ((bg >> 16) & 0xFF) as u8,
@@ -63,8 +65,13 @@ impl ReaderApp {
         result
     }
 
-    /// 从全局配置刷新所有缓存值
+    /// 从全局配置刷新所有缓存值（仅在版本号变化时调用）
     fn refresh_config_cache(&mut self) {
+        let cur_ver = crate::config::AppConfig::version();
+        if cur_ver == self.cached_config_version {
+            return; // 配置未变化，跳过
+        }
+        self.cached_config_version = cur_ver;
         let cfg = crate::config::AppConfig::global().lock().unwrap();
         let bg = AppConfig::parse_color(&cfg.style.bg_color);
         let fg = AppConfig::parse_color(&cfg.style.font_color);
@@ -109,7 +116,7 @@ impl eframe::App for ReaderApp {
             ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
         }
 
-        // 主窗口高度根据字号自适应调整（仅在高度变化时发送，避免不必要的窗口消息）
+        // 主窗口高度根据字号自适应（仅在字号变化时发送）
         {
             let desired_height = self.cached_font_size as f32 * 1.5;
             let (cw, ch) = ctx.input(|i| {
@@ -164,7 +171,7 @@ impl eframe::App for ReaderApp {
         }
 
         // 处理键盘输入
-        self.handle_keyboard(&*ctx_read_only(ctx));
+        self.handle_keyboard(ctx);
 
         // 主面板 - 单行文字显示（使用缓存值，无需每帧加锁）
         let bg = self.cached_bg;
@@ -183,16 +190,14 @@ impl eframe::App for ReaderApp {
                     egui::Sense::click_and_drag(),
                 );
 
-                // 手动拖拽移动窗口（避免 StartDrag 在跨 DPI 屏幕时卡顿）
-                if response.dragged() {
-                    let delta = response.drag_delta();
-                    if let Some(outer_rect) = ctx.input(|i| i.viewport().outer_rect) {
-                        let current_pos = outer_rect.left_top();
-                        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(
-                            current_pos.x + delta.x,
-                            current_pos.y + delta.y,
-                        )));
-                    }
+                // 即时拖拽：绕过 egui 内置阈值，鼠标按下后任意位移都启动拖拽
+                if response.dragged()
+                    || ctx.input(|i| {
+                        i.pointer.button_down(egui::PointerButton::Primary)
+                            && i.pointer.delta() != egui::Vec2::ZERO
+                    })
+                {
+                    ctx.send_viewport_cmd(ViewportCommand::StartDrag);
                 }
 
                 // 右键点击：用 egui 逻辑坐标打开菜单（避免 DPI 下 GetCursorPos 物理坐标错位）
@@ -309,8 +314,12 @@ impl eframe::App for ReaderApp {
             });
 
         // ---- 独立 viewport 窗口 ----
+        //
+        // 策略：
+        //   右键菜单 / 样式窗口 → 始终存在，Visible 切换（打开频繁，不能闪）
+        //   其他窗口 → 仅可见时创建，关闭即销毁（打开频率低，闪了无所谓）
 
-        // 右键菜单（独立 viewport — 始终存在，通过显隐切换避免创建时的闪烁）
+        // ── 右键菜单（始终存在，Visible 切换）──
         {
             let state = self.state.clone();
             let running = self.running.clone();
@@ -337,7 +346,6 @@ impl eframe::App for ReaderApp {
                             .show(vctx, |ui| {
                                 ui.set_min_width(160.0);
 
-                                // 选择文件 → 本地文件
                                 if ui.button("选择本地文件").clicked() {
                                     let state_inner = state.clone();
                                     std::thread::spawn(move || {
@@ -350,32 +358,26 @@ impl eframe::App for ReaderApp {
                                         }
                                     });
                                     state.lock().unwrap().show_context_menu = false;
-                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                                 }
 
-                                // 刷新当前文件
                                 let has_file = state.lock().unwrap().current_file_path.is_some();
                                 if has_file {
                                     if ui.button("刷新").clicked() {
                                         let mut s = state.lock().unwrap();
                                         s.refresh_current_file();
                                         s.show_context_menu = false;
-                                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                                     }
                                 } else {
                                     ui.add_enabled(false, egui::Button::new("刷新(无文件)"));
                                 }
 
-                                // 历史记录
                                 if ui.button("历史记录").clicked() {
                                     state.lock().unwrap().show_context_menu = false;
                                     state.lock().unwrap().show_history_dialog = true;
-                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                                 }
 
                                 ui.separator();
 
-                                // 置顶
                                 let top_label = if cached_top { "取消置顶" } else { "置顶" };
                                 if ui.button(top_label).clicked() {
                                     let new_top = !cached_top;
@@ -385,24 +387,20 @@ impl eframe::App for ReaderApp {
                                     drop(cfg);
                                     state.lock().unwrap().pending_always_on_top = Some(new_top);
                                     state.lock().unwrap().show_context_menu = false;
-                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                                 }
 
                                 ui.separator();
 
-                                // 章节跳转
                                 let has_chapters = !state.lock().unwrap().chapters.is_empty();
                                 if has_chapters {
                                     if ui.button("跳转到章节").clicked() {
                                         state.lock().unwrap().show_context_menu = false;
                                         state.lock().unwrap().show_chapter_dialog = true;
-                                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                                     }
                                 } else {
                                     ui.add_enabled(false, egui::Button::new("跳转到章节(无章节)"));
                                 }
 
-                                // 样式设置
                                 if ui.button("样式设置").clicked() {
                                     let cfg = crate::config::AppConfig::global().lock().unwrap();
                                     let bg = AppConfig::parse_color(&cfg.style.bg_color);
@@ -425,17 +423,13 @@ impl eframe::App for ReaderApp {
                                     s.tmp_font_name = font;
                                     s.tmp_font_size = size;
                                     s.show_style_dialog = true;
-                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                                 }
 
-                                // 快捷键设置
                                 if ui.button("快捷键设置").clicked() {
                                     state.lock().unwrap().show_context_menu = false;
                                     state.lock().unwrap().show_shortcut_dialog = true;
-                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                                 }
 
-                                // 正则表达式
                                 if ui.button("正则表达式").clicked() {
                                     let patterns = crate::regex_config::RegexConfig::global()
                                         .lock()
@@ -447,17 +441,14 @@ impl eframe::App for ReaderApp {
                                     s.regex_list = patterns;
                                     s.regex_test_result = None;
                                     s.show_regex_dialog = true;
-                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                                 }
 
                                 ui.separator();
 
-                                // 退出
                                 if ui.button("退出").clicked() {
                                     let s = state.lock().unwrap();
                                     s.save_current_history();
                                     running.store(false, Ordering::SeqCst);
-                                    vctx.send_viewport_cmd(ViewportCommand::Visible(false));
                                 }
                             });
                     } else {
@@ -467,7 +458,7 @@ impl eframe::App for ReaderApp {
             );
         }
 
-        // 样式设置对话框（始终存在，通过显隐切换避免创建时的闪烁）
+        // ── 样式设置对话框（始终存在，Visible 切换）──
         {
             let state = self.state.clone();
             let dialog_visible = self.with_state(|s| s.show_style_dialog);
@@ -495,10 +486,9 @@ impl eframe::App for ReaderApp {
             );
         }
 
-        // 快捷键设置对话框（始终存在，通过显隐切换避免创建时的闪烁）
-        {
+        // ── 快捷键设置对话框（按需创建/销毁）──
+        if self.with_state(|s| s.show_shortcut_dialog) {
             let state = self.state.clone();
-            let dialog_visible = self.with_state(|s| s.show_shortcut_dialog);
             let center = screen_center(ctx, 240.0, 160.0);
 
             ctx.show_viewport_immediate(
@@ -512,21 +502,14 @@ impl eframe::App for ReaderApp {
                     .with_minimize_button(false)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    if dialog_visible {
-                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
-                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                        render_shortcut_dialog(vctx, &state);
-                    } else {
-                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
-                    }
+                    render_shortcut_dialog(vctx, &state);
                 },
             );
         }
 
-        // 正则表达式对话框（始终存在，通过显隐切换避免创建时的闪烁）
-        {
+        // ── 正则表达式对话框（按需创建/销毁）──
+        if self.with_state(|s| s.show_regex_dialog) {
             let state = self.state.clone();
-            let dialog_visible = self.with_state(|s| s.show_regex_dialog);
             let center = screen_center(ctx, 500.0, 400.0);
 
             ctx.show_viewport_immediate(
@@ -538,21 +521,14 @@ impl eframe::App for ReaderApp {
                     .with_resizable(true)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    if dialog_visible {
-                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
-                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                        render_regex_dialog(vctx, &state);
-                    } else {
-                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
-                    }
+                    render_regex_dialog(vctx, &state);
                 },
             );
         }
 
-        // 章节列表对话框（始终存在，通过显隐切换避免创建时的闪烁）
-        {
+        // ── 章节列表对话框（按需创建/销毁）──
+        if self.with_state(|s| s.show_chapter_dialog) {
             let state = self.state.clone();
-            let dialog_visible = self.with_state(|s| s.show_chapter_dialog);
             let center = screen_center(ctx, 300.0, 400.0);
 
             ctx.show_viewport_immediate(
@@ -564,66 +540,56 @@ impl eframe::App for ReaderApp {
                     .with_resizable(true)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    if dialog_visible {
-                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
-                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                        render_chapter_dialog(vctx, &state);
-                    } else {
-                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
-                    }
+                    render_chapter_dialog(vctx, &state);
                 },
             );
         }
 
-        // 图片显示对话框（始终存在，通过显隐切换避免创建时的闪烁；尺寸动态调整）
-        {
-            let state = self.state.clone();
-            let dialog_visible = self.with_state(|s| s.show_image_dialog);
-            let default_center = screen_center(ctx, 500.0, 400.0);
+        // ── 图片显示对话框（按需创建/销毁）──
+        if self.with_state(|s| s.show_image_dialog) {
+            let (has_image, image_data) = {
+                let s = self.state.lock().unwrap();
+                let img = s.get_current_image();
+                (
+                    s.show_image_dialog && img.is_some(),
+                    img.map(|i| i.data.clone()),
+                )
+            };
+            if has_image {
+                let state = self.state.clone();
 
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("image_dialog"),
-                egui::ViewportBuilder::default()
-                    .with_title("图片")
-                    .with_inner_size([500.0, 400.0])
-                    .with_position(default_center)
-                    .with_resizable(true)
-                    .with_always_on_top(),
-                move |vctx, _class| {
-                    if dialog_visible {
-                        // 动态计算图片尺寸
-                        let image_data = state
-                            .lock()
-                            .unwrap()
-                            .get_current_image()
-                            .map(|i| i.data.clone());
-                        let (img_w, img_h) = image_data
-                            .as_ref()
-                            .and_then(|data| image::load_from_memory(data).ok())
-                            .map(|img| (img.width() as f32, img.height() as f32))
-                            .unwrap_or((500.0, 400.0));
-                        let max_w = 1200.0f32;
-                        let max_h = 900.0f32;
-                        let scale = (max_w / img_w).min(max_h / img_h).min(1.0);
-                        let win_w = (img_w * scale).max(200.0);
-                        let win_h = (img_h * scale).max(150.0);
-                        // 重新计算居中位置
-                        let center = screen_center(vctx, win_w, win_h);
-                        vctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
-                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
-                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                let (img_w, img_h) = image_data
+                    .as_ref()
+                    .and_then(|data| image::load_from_memory(data).ok())
+                    .map(|img| (img.width() as f32, img.height() as f32))
+                    .unwrap_or((500.0, 400.0));
+                let max_w = 1200.0f32;
+                let max_h = 900.0f32;
+                let scale = (max_w / img_w).min(max_h / img_h).min(1.0);
+                let win_w = (img_w * scale).max(200.0);
+                let win_h = (img_h * scale).max(150.0);
+                let center = screen_center(ctx, win_w, win_h);
+
+                ctx.show_viewport_immediate(
+                    egui::ViewportId::from_hash_of("image_dialog"),
+                    egui::ViewportBuilder::default()
+                        .with_title("图片")
+                        .with_inner_size([win_w, win_h])
+                        .with_position(center)
+                        .with_resizable(true)
+                        .with_always_on_top(),
+                    move |vctx, _class| {
                         render_image_dialog(vctx, &state);
-                    } else {
-                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
-                    }
-                },
-            );
+                    },
+                );
+            } else {
+                self.with_state_mut(|s| s.show_image_dialog = false);
+            }
         }
 
-        // 历史记录对话框（始终存在，通过显隐切换避免创建时的闪烁）
-        {
+        // ── 历史记录对话框（按需创建/销毁）──
+        if self.with_state(|s| s.show_history_dialog) {
             let state = self.state.clone();
-            let dialog_visible = self.with_state(|s| s.show_history_dialog);
             let center = screen_center(ctx, 500.0, 400.0);
 
             ctx.show_viewport_immediate(
@@ -635,13 +601,7 @@ impl eframe::App for ReaderApp {
                     .with_resizable(true)
                     .with_always_on_top(),
                 move |vctx, _class| {
-                    if dialog_visible {
-                        vctx.send_viewport_cmd(ViewportCommand::OuterPosition(center));
-                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                        render_history_dialog(vctx, &state);
-                    } else {
-                        vctx.send_viewport_cmd(ViewportCommand::Visible(false));
-                    }
+                    render_history_dialog(vctx, &state);
                 },
             );
         }
@@ -654,10 +614,37 @@ impl eframe::App for ReaderApp {
 }
 
 impl ReaderApp {
-    fn handle_keyboard(&mut self, input: &egui::InputState) {
+    fn handle_keyboard(&mut self, ctx: &egui::Context) {
         // 如果正在等待快捷键输入
-        let waiting = self.with_state(|s| s.waiting_key.clone());
-        if let Some((idx, _)) = waiting {
+        ctx.input(|input| {
+            let waiting = self.with_state(|s| s.waiting_key.clone());
+            if let Some((idx, _)) = waiting {
+                for event in &input.events {
+                    if let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        ..
+                    } = event
+                    {
+                        let key_str = format!("{:?}", key);
+                        let mut cfg = crate::config::AppConfig::global().lock().unwrap();
+                        match idx {
+                            0 => cfg.shortcuts.prev_line = key_str.clone(),
+                            1 => cfg.shortcuts.next_line = key_str.clone(),
+                            2 => cfg.shortcuts.scroll_left = key_str.clone(),
+                            3 => cfg.shortcuts.scroll_right = key_str.clone(),
+                            _ => {}
+                        }
+                        let _ = cfg.save();
+                        let mut s = self.state.lock().unwrap();
+                        s.waiting_key = None;
+                        return;
+                    }
+                }
+                return;
+            }
+
+            // 正常键盘处理
             for event in &input.events {
                 if let egui::Event::Key {
                     key,
@@ -665,52 +652,23 @@ impl ReaderApp {
                     ..
                 } = event
                 {
-                    let key_str = format!("{:?}", key);
-                    let mut cfg = crate::config::AppConfig::global().lock().unwrap();
-                    match idx {
-                        0 => cfg.shortcuts.prev_line = key_str.clone(),
-                        1 => cfg.shortcuts.next_line = key_str.clone(),
-                        2 => cfg.shortcuts.scroll_left = key_str.clone(),
-                        3 => cfg.shortcuts.scroll_right = key_str.clone(),
-                        _ => {}
-                    }
-                    let _ = cfg.save();
+                    let key_name = format!("{:?}", key);
+                    let shortcuts = &self.cached_shortcuts;
                     let mut s = self.state.lock().unwrap();
-                    s.waiting_key = None;
-                    return;
+
+                    if key_name == shortcuts.prev_line {
+                        s.prev_line();
+                    } else if key_name == shortcuts.next_line {
+                        s.next_line();
+                    } else if key_name == shortcuts.scroll_left {
+                        s.scroll_left();
+                    } else if key_name == shortcuts.scroll_right {
+                        s.scroll_right();
+                    }
                 }
             }
-            return;
-        }
-
-        // 正常键盘处理
-        for event in &input.events {
-            if let egui::Event::Key {
-                key,
-                pressed: true,
-                ..
-            } = event
-            {
-                let key_name = format!("{:?}", key);
-                let shortcuts = &self.cached_shortcuts;
-                let mut s = self.state.lock().unwrap();
-
-                if key_name == shortcuts.prev_line {
-                    s.prev_line();
-                } else if key_name == shortcuts.next_line {
-                    s.next_line();
-                } else if key_name == shortcuts.scroll_left {
-                    s.scroll_left();
-                } else if key_name == shortcuts.scroll_right {
-                    s.scroll_right();
-                }
-            }
-        }
+        });
     }
-}
-
-fn ctx_read_only(ctx: &egui::Context) -> std::sync::Arc<egui::InputState> {
-    ctx.input(|i| std::sync::Arc::new(i.clone()))
 }
 
 // ---- 独立 viewport 渲染函数 ----

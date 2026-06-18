@@ -1,12 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 const CONFIG_FILE: &str = "config.json";
 
 /// 全局单例
 static INSTANCE: std::sync::OnceLock<Mutex<AppConfig>> = std::sync::OnceLock::new();
+
+/// 配置版本号：每次 save 时递增，用于检测配置变更
+static CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StyleConfig {
@@ -97,7 +101,14 @@ impl AppConfig {
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::config_path();
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(&path, json)
+        fs::write(&path, json)?;
+        CONFIG_VERSION.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    /// 获取当前配置版本号（用于检测是否需要刷新缓存）
+    pub fn version() -> u64 {
+        CONFIG_VERSION.load(Ordering::Acquire)
     }
 
     pub fn parse_color(hex: &str) -> u32 {
