@@ -3,16 +3,21 @@ use crate::state::{AppState, SharedState};
 use egui::{Color32, Context, ViewportCommand};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use windows::Win32::Foundation::POINT;
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
 /// 计算屏幕中心位置（用于定位对话框窗口）
-fn screen_center(win_w: f32, win_h: f32) -> egui::Pos2 {
-    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
-    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
+/// 使用当前显示器尺寸计算，而非 viewport 自身尺寸
+fn screen_center(ctx: &egui::Context, win_w: f32, win_h: f32) -> egui::Pos2 {
+    let (mw, mh) = ctx
+        .input(|i| i.viewport().monitor_size)
+        .map(|s| (s.x, s.y))
+        .unwrap_or_else(|| {
+            // fallback: 用 screen_rect（viewport 尺寸，不如 monitor_size 准确）
+            let r = ctx.screen_rect();
+            (r.width(), r.height())
+        });
     egui::pos2(
-        ((screen_w - win_w) / 2.0).max(0.0),
-        ((screen_h - win_h) / 2.0).max(0.0),
+        ((mw - win_w) / 2.0).max(0.0),
+        ((mh - win_h) / 2.0).max(0.0),
     )
 }
 
@@ -178,19 +183,34 @@ impl eframe::App for ReaderApp {
                     egui::Sense::click_and_drag(),
                 );
 
-                // 拖拽移动窗口
+                // 手动拖拽移动窗口（避免 StartDrag 在跨 DPI 屏幕时卡顿）
                 if response.dragged() {
-                    ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+                    let delta = response.drag_delta();
+                    if let Some(outer_rect) = ctx.input(|i| i.viewport().outer_rect) {
+                        let current_pos = outer_rect.left_top();
+                        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(
+                            current_pos.x + delta.x,
+                            current_pos.y + delta.y,
+                        )));
+                    }
                 }
 
-                // 右键点击：使用 GetCursorPos 获取屏幕绝对坐标打开菜单
+                // 右键点击：用 egui 逻辑坐标打开菜单（避免 DPI 下 GetCursorPos 物理坐标错位）
                 if response.secondary_clicked() {
-                    let mut pt = POINT::default();
-                    unsafe { let _ = GetCursorPos(&mut pt); }
-                    self.with_state_mut(|s| {
-                        s.show_context_menu = true;
-                        s.menu_position = (pt.x as f32, pt.y as f32);
-                    });
+                    if let Some(pointer_pos) = response.hover_pos() {
+                        let vp_pos = ctx
+                            .input(|i| i.viewport().outer_rect)
+                            .map(|r| r.left_top())
+                            .unwrap_or(egui::pos2(0.0, 0.0));
+                        let screen_pos = egui::pos2(
+                            vp_pos.x + pointer_pos.x,
+                            vp_pos.y + pointer_pos.y,
+                        );
+                        self.with_state_mut(|s| {
+                            s.show_context_menu = true;
+                            s.menu_position = (screen_pos.x, screen_pos.y);
+                        });
+                    }
                 }
 
                 // 左键点击：如果是图片行则显示图片，否则关闭菜单
@@ -451,7 +471,7 @@ impl eframe::App for ReaderApp {
         if self.with_state(|s| s.show_style_dialog) {
             let state = self.state.clone();
             let ctx_clone = ctx.clone();
-            let center = screen_center(380.0, 250.0);
+            let center = screen_center(ctx, 380.0, 250.0);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("style_dialog"),
@@ -476,7 +496,7 @@ impl eframe::App for ReaderApp {
         // 快捷键设置对话框（独立 viewport）
         if self.with_state(|s| s.show_shortcut_dialog) {
             let state = self.state.clone();
-            let center = screen_center(240.0, 160.0);
+            let center = screen_center(ctx, 240.0, 160.0);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("shortcut_dialog"),
@@ -497,7 +517,7 @@ impl eframe::App for ReaderApp {
         // 正则表达式对话框（独立 viewport）
         if self.with_state(|s| s.show_regex_dialog) {
             let state = self.state.clone();
-            let center = screen_center(500.0, 400.0);
+            let center = screen_center(ctx, 500.0, 400.0);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("regex_dialog"),
@@ -516,7 +536,7 @@ impl eframe::App for ReaderApp {
         // 章节列表对话框（独立 viewport）
         if self.with_state(|s| s.show_chapter_dialog) {
             let state = self.state.clone();
-            let center = screen_center(300.0, 400.0);
+            let center = screen_center(ctx, 300.0, 400.0);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("chapter_dialog"),
@@ -559,7 +579,7 @@ impl eframe::App for ReaderApp {
                 let win_w = (img_w * scale).max(200.0);
                 let win_h = (img_h * scale).max(150.0);
 
-                let center = screen_center(win_w, win_h);
+                let center = screen_center(ctx, win_w, win_h);
 
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("image_dialog"),
@@ -582,7 +602,7 @@ impl eframe::App for ReaderApp {
         // 历史记录对话框（独立 viewport）
         if self.with_state(|s| s.show_history_dialog) {
             let state = self.state.clone();
-            let center = screen_center(500.0, 400.0);
+            let center = screen_center(ctx, 500.0, 400.0);
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("history_dialog"),
