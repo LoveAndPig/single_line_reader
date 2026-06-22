@@ -21,6 +21,24 @@ fn screen_center(ctx: &egui::Context, win_w: f32, win_h: f32) -> egui::Pos2 {
     )
 }
 
+/// 计算右键菜单 X 坐标：若菜单超出屏幕右边界则左移
+fn clamp_menu_x(raw_x: f32, menu_w: f32, screen_w: f32) -> f32 {
+    if raw_x + menu_w > screen_w {
+        (screen_w - menu_w).max(0.0)
+    } else {
+        raw_x
+    }
+}
+
+/// 计算右键菜单 Y 坐标：若菜单超出屏幕下边界则显示在上方
+fn clamp_menu_y(raw_y: f32, menu_h: f32, screen_h: f32) -> f32 {
+    if raw_y + menu_h > screen_h {
+        (raw_y - menu_h).max(0.0)
+    } else {
+        raw_y
+    }
+}
+
 pub struct ReaderApp {
     state: SharedState,
     running: Arc<AtomicBool>,
@@ -217,13 +235,20 @@ impl eframe::App for ReaderApp {
                             .input(|i| i.viewport().outer_rect)
                             .map(|r| r.left_top())
                             .unwrap_or(egui::pos2(0.0, 0.0));
-                        let screen_pos = egui::pos2(
-                            vp_pos.x + pointer_pos.x,
-                            vp_pos.y + pointer_pos.y,
-                        );
+                        let raw_x = vp_pos.x + pointer_pos.x;
+                        let raw_y = vp_pos.y + pointer_pos.y;
+                        let (mw, mh) = ctx
+                            .input(|i| {
+                                i.viewport()
+                                    .monitor_size
+                                    .map(|s| (s.x, s.y))
+                                    .unwrap_or((1920.0, 1080.0))
+                            });
+                        let menu_x = clamp_menu_x(raw_x, 180.0, mw);
+                        let menu_y = clamp_menu_y(raw_y, 240.0, mh);
                         self.with_state_mut(|s| {
                             s.show_context_menu = true;
-                            s.menu_position = (screen_pos.x, screen_pos.y);
+                            s.menu_position = (menu_x, menu_y);
                         });
                     }
                 }
