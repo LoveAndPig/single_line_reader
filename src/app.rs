@@ -104,7 +104,6 @@ impl ReaderApp {
 impl eframe::App for ReaderApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.refresh_config_cache();
-
         // 处理待应用的置顶状态变更
         let pending_top = self.with_state_mut(|s| s.pending_always_on_top.take());
         if let Some(top) = pending_top {
@@ -134,6 +133,17 @@ impl eframe::App for ReaderApp {
 
         // 检查运行标志
         if !self.running.load(Ordering::SeqCst) {
+            // 退出前记录当前窗口位置和宽度
+            ctx.input(|i| {
+                if let (Some(outer), Some(inner)) =
+                    (i.viewport().outer_rect, i.viewport().inner_rect)
+                {
+                    let mut cfg = crate::config::AppConfig::global().lock().unwrap();
+                    cfg.window_x = outer.left() as i32;
+                    cfg.window_y = outer.top() as i32;
+                    cfg.window_width = inner.width() as i32;
+                }
+            });
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
@@ -609,6 +619,8 @@ impl eframe::App for ReaderApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.with_state(|s| s.save_current_history());
+        // 退出时持久化窗口位置和大小
+        let _ = crate::config::AppConfig::global().lock().unwrap().save();
         self.running.store(false, Ordering::SeqCst);
     }
 }
